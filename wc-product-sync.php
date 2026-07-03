@@ -681,32 +681,56 @@ final class WC_Product_Sync {
 		return $sku;
 	}
 
-	/**
-	 * Szuka istniejącego produktu na celzie: najpierw po SKU, potem po nazwie.
+/**
+	 * Szuka istniejącego produktu na celzie: najpierw po SKU, potem po source_id, na końcu po nazwie.
 	 */
 	private function find_existing_product( array $p ) {
+		global $wpdb;
+
+		// 1) Lookup po SKU — bezpośrednie zapytanie SQL (bypass WC cache).
 		$sku = $this->require_sku( $p );
 		if ( '' !== $sku ) {
-			$id = wc_get_product_id_by_sku( $sku );
+			$id = self::sku_to_id( $sku );
 			if ( $id ) {
 				return $id;
 			}
 		}
+
+		// 2) Lookup po source_id z bazy — 100% trafne.
+		if ( ! empty( $p['id'] ) ) {
+			$src_id = absint( $p['id'] );
+			$id = $wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value = %d LIMIT 1",
+					self::META_SOURCE_ID,
+					$src_id
+				)
+			);
+			if ( $id ) {
+				return absint( $id );
+			}
+		}
+
+		// 3) Fallback: szukaj po nazwie — TYLKO jeśli produkt ma _wps_source_id
+		//    które PASUJE do aktualnego source_id. Zapobiega błędom fuzzy matchingu WooCommerce.
 		$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
-		if ( '' !== $name ) {
-			// Najpierw sprawdź czy produkt ma już inny source_id – wtedy to duplikat, nie ten sam produkt.
+		if ( '' !== $name && ! empty( $p['id'] ) ) {
 			$found = get_posts( array(
 				'post_type'      => 'product',
 				'post_title'     => $name,
 				'post_status'    => 'any',
-				'posts_per_page' => 2,
+				'posts_per_page' => 5,
 				'fields'         => 'ids',
 			) );
 			if ( $found && count( $found ) === 1 ) {
-				return (int) $found[0];
+				$pid = (int) $found[0];
+				$found_source_id = get_post_meta( $pid, self::META_SOURCE_ID, true );
+				if ( $found_source_id && absint( $found_source_id ) === $src_id ) {
+					return $pid;
+				}
 			}
-			// Wiele produktów o tej samej nazwie – nie możemy jednoznacznie dopasować.
 		}
+
 		return 0;
 	}
 
@@ -1087,7 +1111,7 @@ final class WC_Product_Sync {
 
 	private function upsert_grouped( array $p, $dry_run ) {
 		$sku         = isset( $p['sku'] ) ? trim( $p['sku'] ) : '';
-		$existing_id = $sku ? wc_get_product_id_by_sku( $sku ) : 0;
+		$existing_id = $sku ? self::sku_to_id( $sku ) : 0;
 
 		if ( ! $existing_id && ! empty( $p['id'] ) ) {
 			$found = get_posts( array(
@@ -1123,7 +1147,7 @@ final class WC_Product_Sync {
 				$this->log( 'warning', sprintf( "Grouped '%s': dziecko src_id=%d bez SKU – pomijam.", $p['name'] ?? '?', $child_source_id ) );
 				continue;
 			}
-			$local = wc_get_product_id_by_sku( $child_sku );
+			$local = self::sku_to_id( $child_sku );
 			if ( $local ) {
 				$child_ids[] = $local;
 			} else {
@@ -1386,6 +1410,23 @@ final class WC_Product_Sync {
 	private function should_sync_status( $source_status ) {
 		$allowed = apply_filters( 'wps_sync_statuses', array( 'publish' ), $source_status );
 		return in_array( $source_status, (array) $allowed, true );
+	}
+
+	/** Resolve SKU → product ID via direct SQL — bypasses all WC
+	 *  caching layers (deferred indexing in v9+, object cache, etc.).
+	 *  Always reads fresh data from the database. */
+	private static function sku_to_id( $sku ) {
+		global $wpdb;
+		if ( '' === trim( $sku ) ) {
+			return 0;
+		}
+		$id = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_sku' AND meta_value = %s LIMIT 1",
+				trim( $sku )
+			)
+		);
+		return $id ? absint( $id ) : 0;
 	}
 
 	/* =====================================================================
