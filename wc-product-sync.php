@@ -27,20 +27,17 @@ final class WC_Product_Sync {
 	const CRON_HOOK       = 'wc_product_sync_daily_event';
 	const LOG_SOURCE      = 'wc-product-sync';
 	const NONCE_ACTION    = 'wc_product_sync_run';
-	const SYNC_LOCK_TRANSIENT = 'wps_sync_running';   // klucz transient blokady współbieżności
+	const SYNC_LOCK_TRANSIENT = 'wps_sync_running';
 
 	// Soft-delete
-	const META_SYNCED       = '_wps_synced';         // znacznik: produkt zarządzany przez sync
-	const META_SOFT_DELETED = '_wps_soft_deleted_at'; // timestamp zdraftowania
+	const META_SYNCED       = '_wps_synced';
+	const META_SOFT_DELETED = '_wps_soft_deleted_at';
 	const TAG_SLUG          = 'wps-usuniete';
 	const TAG_NAME          = 'Usunięte (sync)';
 	const META_SOURCE_ID    = '_wps_source_id';
 
 	/** @var WC_Product_Sync|null */
 	private static $instance = null;
-
-	// Flaga wymuszająca pełny reset + sync
-	public static $force_full_sync = false;
 
 	/** Cache: źródłowe atrybuty globalne  id => ['name','slug'] */
 	private $source_attributes = array();
@@ -79,7 +76,6 @@ final class WC_Product_Sync {
 		}
 	}
 
-	/** Schedule cron at configured hour/minute (static-friendly version). */
 	private static function schedule_cron_at_time() {
 		$opts   = get_option( self::OPTION_KEY, array() );
 		$hour   = isset( $opts['cron_hour'] ) ? (int) $opts['cron_hour'] : 3;
@@ -106,15 +102,12 @@ final class WC_Product_Sync {
 		}
 	}
 
-	/** Planuje kolejne uruchomienie o ustawionej godzinie/minucie. */
 	private function schedule_next_run() {
 		$hour   = (int) $this->get_options()['cron_hour'];
 		$minute = (int) $this->get_options()['cron_minute'];
-		// Oblicz następne uruchomienie o podanej godzinie.
 		$now    = time();
 		$today  = mktime( $hour, $minute, 0, gmdate( 'n', $now ), gmdate( 'j', $now ), gmdate( 'Y', $now ) );
 		if ( $today <= $now ) {
-			// Dzisiaj się już nie zmieści – planuj na jutro.
 			$today = strtotime( '+1 day', $today );
 		}
 		wp_schedule_event( $today, 'daily', self::CRON_HOOK );
@@ -126,17 +119,18 @@ final class WC_Product_Sync {
 	 * ================================================================== */
 
 	private function get_options() {
-$defaults = array(
-		'source_url'       => '',
-		'consumer_key'     => '',
-		'consumer_secret'  => '',
-		'per_page'            => 100,
-		'schedule_enabled'    => 0,
-		'soft_delete_enabled' => 0,
-		'soft_delete_limit'   => 50,
-		'cron_hour'           => 3,
-		'cron_minute'         => 0,
-	);
+		$defaults = array(
+			'source_url'          => '',
+			'consumer_key'        => '',
+			'consumer_secret'     => '',
+			'per_page'            => 100,
+			'schedule_enabled'    => 0,
+			'soft_delete_enabled' => 0,
+			'soft_delete_limit'   => 50,
+			'cron_hour'           => 3,
+			'cron_minute'         => 0,
+			'force_full_sync'     => 0,
+		);
 		return wp_parse_args( get_option( self::OPTION_KEY, array() ), $defaults );
 	}
 
@@ -179,7 +173,6 @@ $defaults = array(
 
 	public function sanitize_options( $input ) {
 		$out = $this->get_options();
-		// Only overwrite fields that are actually present in $input (disabled inputs are not submitted).
 		if ( isset( $input['source_url'] ) ) {
 			$out['source_url']       = esc_url_raw( trim( $input['source_url'] ) );
 		}
@@ -192,20 +185,20 @@ $defaults = array(
 		if ( isset( $input['per_page'] ) ) {
 			$out['per_page']         = max( 1, min( 100, (int) $input['per_page'] ) );
 		}
-$out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
-	$out['soft_delete_enabled'] = empty( $input['soft_delete_enabled'] ) ? 0 : 1;
-	if ( isset( $input['soft_delete_limit'] ) ) {
-		$out['soft_delete_limit']   = max( 0, (int) $input['soft_delete_limit'] );
-	}
-	if ( isset( $input['cron_hour'] ) ) {
-		$out['cron_hour']         = max( 0, min( 23, (int) $input['cron_hour'] ) );
-	}
-	if ( isset( $input['cron_minute'] ) ) {
-		$out['cron_minute']       = max( 0, min( 59, (int) $input['cron_minute'] ) );
-	}
-	if ( isset( $input['force_full_sync'] ) ) {
-		$out['force_full_sync']   = empty( $input['force_full_sync'] ) ? 0 : 1;
-	}
+		$out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
+		$out['soft_delete_enabled'] = empty( $input['soft_delete_enabled'] ) ? 0 : 1;
+		if ( isset( $input['soft_delete_limit'] ) ) {
+			$out['soft_delete_limit']   = max( 0, (int) $input['soft_delete_limit'] );
+		}
+		if ( isset( $input['cron_hour'] ) ) {
+			$out['cron_hour']         = max( 0, min( 23, (int) $input['cron_hour'] ) );
+		}
+		if ( isset( $input['cron_minute'] ) ) {
+			$out['cron_minute']       = max( 0, min( 59, (int) $input['cron_minute'] ) );
+		}
+		if ( isset( $input['force_full_sync'] ) ) {
+			$out['force_full_sync']   = empty( $input['force_full_sync'] ) ? 0 : 1;
+		}
 		add_action( 'shutdown', array( $this, 'sync_cron_schedule' ) );
 		return $out;
 	}
@@ -247,7 +240,7 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Synchronizacja produktów WooCommerce', 'wc-product-sync' ); ?></h1>
 
-			<?php if ( isset( $_GET['synced'] ) ) : // phpcs:ignore WordPress.Security.NonceVerification.Recommended ?>
+			<?php if ( isset( $_GET['synced'] ) ) : ?>
 				<div class="notice notice-success is-dismissible"><p>
 					<?php
 					printf(
@@ -293,43 +286,43 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 						<td><input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[per_page]" id="wps_pp" type="number" min="1" max="100" class="small-text"
 							value="<?php echo esc_attr( $opts['per_page'] ); ?>" /></td>
 					</tr>
-<tr>
-			<th scope="row"><?php esc_html_e( 'Harmonogram', 'wc-product-sync' ); ?></th>
-			<td>
-				<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[schedule_enabled]" value="1"
-					<?php checked( ! empty( $opts['schedule_enabled'] ) ); ?> /> <?php esc_html_e( 'Uruchamiaj codziennie (WP-Cron)', 'wc-product-sync' ); ?></label>
-				<p class="description">
-					<?php
-					if ( $next ) {
-						printf( esc_html__( 'Następne uruchomienie: %s', 'wc-product-sync' ), esc_html( get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $next ), 'Y-m-d H:i:s' ) ) );
-					} else {
-						esc_html_e( 'Brak zaplanowanego uruchomienia.', 'wc-product-sync' );
-					}
-					?>
-				</p>
-			</td>
-		</tr>
-		<tr>
-			<th scope="row"><?php esc_html_e( 'Godzina sync', 'wc-product-sync' ); ?></th>
-			<td>
-				<label>
-					<?php esc_html_e( 'Codziennie o:', 'wc-product-sync' ); ?>
-					<input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[cron_hour]" id="wps_cron_h" type="number" min="0" max="23" class="small-text"
-						value="<?php echo esc_attr( $opts['cron_hour'] ?? 3 ); ?>" style="width:60px;" /> :
-					<input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[cron_minute]" id="wps_cron_m" type="number" min="0" max="59" class="small-text"
-						value="<?php echo esc_attr( $opts['cron_minute'] ?? 0 ); ?>" style="width:60px;" />
-				</label>
-				<p class="description"><?php esc_html_e( 'Domena czasu WordPress. Domyślnie 03:00.', 'wc-product-sync' ); ?></p>
-			</td>
-		</tr>
-		<tr>
-			<th scope="row"><?php esc_html_e( 'Pełna synchronizacja', 'wc-product-sync' ); ?></th>
-			<td>
-				<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[force_full_sync]" value="1"
-					<?php checked( ! empty( $opts['force_full_sync'] ) ); ?> /> <?php esc_html_e( 'Wyczyść lokalne produkty sync przed uruchomieniem', 'wc-product-sync' ); ?></label>
-				<p class="description"><?php esc_html_e( 'UWAGA: usunie wszystkie lokalne produkty oznaczone jako zsynchronizowane. Zalecane przy pierwszym użyciu lub naprawie.', 'wc-product-sync' ); ?></p>
-			</td>
-		</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Harmonogram', 'wc-product-sync' ); ?></th>
+						<td>
+							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[schedule_enabled]" value="1"
+								<?php checked( ! empty( $opts['schedule_enabled'] ) ); ?> /> <?php esc_html_e( 'Uruchamiaj codziennie (WP-Cron)', 'wc-product-sync' ); ?></label>
+							<p class="description">
+								<?php
+								if ( $next ) {
+									printf( esc_html__( 'Następne uruchomienie: %s', 'wc-product-sync' ), esc_html( get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $next ), 'Y-m-d H:i:s' ) ) );
+								} else {
+									esc_html_e( 'Brak zaplanowanego uruchomienia.', 'wc-product-sync' );
+								}
+								?>
+							</p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Godzina sync', 'wc-product-sync' ); ?></th>
+						<td>
+							<label>
+								<?php esc_html_e( 'Codziennie o:', 'wc-product-sync' ); ?>
+								<input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[cron_hour]" id="wps_cron_h" type="number" min="0" max="23" class="small-text"
+									value="<?php echo esc_attr( $opts['cron_hour'] ?? 3 ); ?>" style="width:60px;" /> :
+								<input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[cron_minute]" id="wps_cron_m" type="number" min="0" max="59" class="small-text"
+									value="<?php echo esc_attr( $opts['cron_minute'] ?? 0 ); ?>" style="width:60px;" />
+							</label>
+							<p class="description"><?php esc_html_e( 'Domena czasu WordPress. Domyślnie 03:00.', 'wc-product-sync' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Pełna synchronizacja', 'wc-product-sync' ); ?></th>
+						<td>
+							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[force_full_sync]" value="1"
+								<?php checked( ! empty( $opts['force_full_sync'] ) ); ?> /> <?php esc_html_e( 'Wyczyść lokalne produkty sync przed uruchomieniem', 'wc-product-sync' ); ?></label>
+							<p class="description"><?php esc_html_e( 'UWAGA: usunie wszystkie lokalne produkty oznaczone jako zsynchronizowane. Zalecane przy pierwszym użyciu.', 'wc-product-sync' ); ?></p>
+						</td>
+					</tr>
 					<tr>
 						<th scope="row"><?php esc_html_e( 'Soft-delete', 'wc-product-sync' ); ?></th>
 						<td>
@@ -383,7 +376,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		}
 		check_admin_referer( self::NONCE_ACTION );
 
-		// Keep running even if user closes browser / drops connection.
 		if ( function_exists( 'ignore_user_abort' ) ) {
 			@ignore_user_abort( true );
 		}
@@ -453,7 +445,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		return new WP_Error( 'wps_http', "Nieudane pobranie $url" );
 	}
 
-	/** Pobiera pojedynczą stronę produktów ze źródła (status any). */
 	private function fetch_product_page( int $page ) {
 		return $this->api_get( '/wp-json/wc/v3/products', array(
 			'per_page' => $this->cfg_per_page(),
@@ -462,7 +453,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		) );
 	}
 
-	/** Iteruje po wszystkich produktach page-by-page (M5 memory optimization). */
 	private function foreach_product( callable $callback ) {
 		$page   = 1;
 		$per_page = $this->cfg_per_page();
@@ -486,7 +476,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 				$callback( $product, $this );
 			}
 
-			// Free memory after processing this page.
 			unset( $batch );
 			if ( function_exists( 'gc_collect_cycles' ) ) {
 				gc_collect_cycles();
@@ -498,7 +487,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		return $total_counted;
 	}
 
-	/** Definicje atrybutów globalnych ze źródła: id => ['name','slug'(bez pa_)]. */
 	private function fetch_source_attributes() {
 		$out  = array();
 		$list = $this->api_get( '/wp-json/wc/v3/products/attributes', array( 'per_page' => 100 ) );
@@ -559,18 +547,15 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 			return $stats;
 		}
 
-		// ── Concurrency guard: single sync at a time ──────────────
 		if ( get_transient( self::SYNC_LOCK_TRANSIENT ) ) {
 			$this->log( 'warning', 'Synchronizacja już trwa (blokada transient) – przerywam.' );
 			return $stats;
 		}
 
-		// Set execution time limit to avoid PHP max_execution_time kills.
 		if ( function_exists( 'set_time_limit' ) ) {
-			@set_time_limit( 600 ); // 10 minutes per sync run
+			@set_time_limit( 600 );
 		}
 
-		// Acquire transient lock: 900 s TTL covers slow API responses.
 		set_transient( self::SYNC_LOCK_TRANSIENT, time(), 900 );
 
 		try {
@@ -580,14 +565,12 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		}
 	}
 
-	/** Internal sync logic – split so the lock/unlock is always clean. */
 	private function run_sync_inner( $dry_run, &$stats ) {
 		$this->log( 'info', '=== Start synchronizacji' . ( $dry_run ? ' [DRY RUN]' : '' ) . ' ===' );
 
-		// Pełna synchronizacja – usuń stare lokalne produkty oznaczone przez sync.
+		// Pełna synchronizacja – usuń stare lokalne produkty.
 		$force_full = ! empty( $this->get_options()['force_full_sync'] );
-		if ( $force_full ) {
-			update_option( self::OPTION_KEY, wp_parse_args( array( 'force_full_sync' => 0 ), get_option( self::OPTION_KEY ) ) ); // reset flagi po zapisaniu
+		if ( $force_full && ! $dry_run ) {
 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
 			global $wpdb;
 			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
@@ -606,22 +589,19 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 			}
 		}
 
-		// Reset cache na przebieg.
 		$this->attr_map_cache   = array();
 		$this->source_id_to_sku = array();
 		$this->fetch_had_error  = false;
 
 		$this->source_attributes = $this->fetch_source_attributes();
 
-		// ── Phase 1: Build source_id → SKU map (lightweight, page-by-page) ──
 		$source_count = 0;
-		$source_keys  = array(); // dla soft-delete: ['sku'=>'...', 'name'=>'...']
-		$grouped_buf  = array(); // buffer grouped products for later processing
+		$source_keys  = array();
+		$grouped_buf  = array();
 
 		$this->foreach_product( function( $p ) use ( &$stats, &$source_count, &$source_keys, &$grouped_buf, $dry_run ) {
 			$source_count++;
 
-			// Build key map (needed for soft-delete + grouped children lookup).
 			$sku = isset( $p['sku'] ) ? trim( $p['sku'] ) : '';
 			if ( '' !== $sku ) {
 				$this->source_id_to_sku[ (int) $p['id'] ] = $sku;
@@ -629,13 +609,12 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 			} else {
 				$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
 				if ( '' !== $name ) {
-					$source_keys[]                            = $name; // nazwa jako fallback key
+					$source_keys[] = $name;
 				}
 			}
 
-			// Process non-grouped products immediately (flush memory after).
 			if ( isset( $p['type'] ) && 'grouped' === $p['type'] ) {
-				$grouped_buf[] = $p; // buffer for phase 3
+				$grouped_buf[] = $p;
 			} else {
 				$this->process_single_product( $p, $dry_run, $stats );
 			}
@@ -643,14 +622,12 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 
 		$this->log( 'info', sprintf( 'Pobrano %d produktów, %d atrybutów globalnych', $source_count, count( $this->source_attributes ) ) );
 
-		// ── Phase 3: Process buffered grouped products (children already synced) ──
 		foreach ( $grouped_buf as $p ) {
 			$this->process_single_product( $p, $dry_run, $stats );
 		}
 		unset( $grouped_buf );
 		if ( function_exists( 'gc_collect_cycles' ) ) gc_collect_cycles();
 
-		// Soft-delete: produkty zarządzane, których klucza (SKU lub nazwy) nie ma już w źródle.
 		if ( ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
 			$this->soft_delete_missing( array_unique( $source_keys ), $source_count, $dry_run );
 		}
@@ -663,9 +640,7 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		return $stats;
 	}
 
-	/** Dispatch single product to upsert handler (shared by phase 2 and 3). */
 	private function process_single_product( array $p, $dry_run, &$stats ) {
-		// Filter: allow disabling sync for specific statuses.
 		if ( ! $this->should_sync_status( $p['status'] ?? 'publish' ) ) {
 			$stats['skipped']++;
 			return;
@@ -701,10 +676,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		}
 	}
 
-	/* =====================================================================
-	 *  Wspólne settery
-	 * ================================================================== */
-
 	private function require_sku( array $p ) {
 		$sku = isset( $p['sku'] ) ? trim( $p['sku'] ) : '';
 		return $sku;
@@ -712,7 +683,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 
 	/**
 	 * Szuka istniejącego produktu na celzie: najpierw po SKU, potem po nazwie.
-	 * Zwraca ID produktu lub 0 gdy nie znaleziono.
 	 */
 	private function find_existing_product( array $p ) {
 		$sku = $this->require_sku( $p );
@@ -722,37 +692,20 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 				return $id;
 			}
 		}
-		// Fallback: dopasowanie po nazwie (post_title).
 		$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
 		if ( '' !== $name ) {
+			// Najpierw sprawdź czy produkt ma już inny source_id – wtedy to duplikat, nie ten sam produkt.
 			$found = get_posts( array(
 				'post_type'      => 'product',
 				'post_title'     => $name,
 				'post_status'    => 'any',
-				'posts_per_page' => 1,
+				'posts_per_page' => 2,
 				'fields'         => 'ids',
-				'meta_query'     => array(
-					array(
-						'key'     => self::META_SOURCE_ID,
-						'value'   => (int) $p['id'],
-						'compare' => 'NOT EXISTS',
-					),
-				),
 			) );
-			if ( $found ) {
+			if ( $found && count( $found ) === 1 ) {
 				return (int) $found[0];
 			}
-			// Druga próba: po prostu po nazwie (gdy produkt lokalny już istnieje z inną metką).
-			$found2 = get_posts( array(
-				'post_type'      => 'product',
-				'post_title'     => $name,
-				'post_status'    => 'any',
-				'posts_per_page' => 1,
-				'fields'         => 'ids',
-			) );
-			if ( $found2 ) {
-				return (int) $found2[0];
-			}
+			// Wiele produktów o tej samej nazwie – nie możemy jednoznacznie dopasować.
 		}
 		return 0;
 	}
@@ -799,7 +752,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		}
 	}
 
-	/** Wymusza typ produktu przy zmianie (np. simple -> variable). */
 	private function ensure_product_type( $existing_id, $wanted_class, $wanted_term ) {
 		$product = $existing_id ? wc_get_product( $existing_id ) : null;
 		if ( $product && ! is_a( $product, $wanted_class ) ) {
@@ -812,28 +764,8 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		return $product;
 	}
 
-	/* =====================================================================
-	 *  SIMPLE
-	 * ================================================================== */
-
-	private function upsert_simple( array $p, $dry_run ) {
-		$sku   = $this->require_sku( $p );
-		$found = $this->find_existing_product( $p );
-		if ( '' !== $sku && $found ) {
-			// Znaleziono po SKU – aktualizacja.
-			return $this->update_existing_product( $found, 'WC_Product_Simple', 'simple', $p, $dry_run, $sku );
-		} elseif ( '' === $sku && $found ) {
-			// Brak SKU na źródle, ale znaleziono po nazwie – aktualizacja.
-			return $this->update_existing_product( $found, 'WC_Product_Simple', 'simple', $p, $dry_run, '' );
-		}
-		// Tworzenie nowego produktu.
-		return $this->create_new_product( 'WC_Product_Simple', 'simple', $p, $dry_run, $sku );
-	}
-
 	/** Aktualizuje istniejący produkt z danymi ze źródła. */
 	private function update_existing_product( $existing_id, $wanted_class, $wanted_term, array $p, $dry_run, $sku ) {
-		$is_update = true;
-
 		if ( $dry_run ) {
 			$this->log( 'info', sprintf( '[DRY] UPDATE %s: %s (%s=%s)', $wanted_term, $p['name'], $sku ? 'SKU' : 'nazwa', $sku ?: $p['name'] ) );
 			return 'updated';
@@ -848,6 +780,11 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 			$product->set_regular_price( isset( $p['regular_price'] ) ? (string) $p['regular_price'] : '' );
 			$product->set_sale_price( isset( $p['sale_price'] ) ? (string) $p['sale_price'] : '' );
 			$this->apply_stock( $product, $p );
+		} elseif ( 'WC_Product_Variable' === $wanted_class ) {
+			if ( ! empty( $p['stock_status'] ) ) {
+				$product->set_stock_status( $p['stock_status'] );
+			}
+			$product->set_attributes( $this->build_parent_attributes( $p['attributes'] ?? array() ) );
 		}
 		$this->apply_physical( $product, $p );
 
@@ -864,7 +801,12 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 	/** Tworzy nowy produkt i zapisuje go na celzie. */
 	private function create_new_product( $wanted_class, $wanted_term, array $p, $dry_run, $sku ) {
 		if ( $dry_run ) {
-			$this->log( 'info', sprintf( '[DRY] CREATE %s: %s (%s=%s)', $wanted_term, $p['name'], 'SKU', $sku ?: '(brak)' ) );
+			if ( 'WC_Product_Variable' === $wanted_class ) {
+				$vars = $this->fetch_variations( (int) $p['id'] );
+				$this->log( 'info', sprintf( '[DRY] CREATE %s: %s (SKU=%s, wariacji=%d)', $wanted_term, $p['name'], $sku ?: '(brak)', count( $vars ) ) );
+			} else {
+				$this->log( 'info', sprintf( '[DRY] CREATE %s: %s (SKU=%s)', $wanted_term, $p['name'], $sku ?: '(brak)' ) );
+			}
 			return 'created';
 		}
 
@@ -877,6 +819,11 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 			$product->set_regular_price( isset( $p['regular_price'] ) ? (string) $p['regular_price'] : '' );
 			$product->set_sale_price( isset( $p['sale_price'] ) ? (string) $p['sale_price'] : '' );
 			$this->apply_stock( $product, $p );
+		} elseif ( 'WC_Product_Variable' === $wanted_class ) {
+			if ( ! empty( $p['stock_status'] ) ) {
+				$product->set_stock_status( $p['stock_status'] );
+			}
+			$product->set_attributes( $this->build_parent_attributes( $p['attributes'] ?? array() ) );
 		}
 		$this->apply_physical( $product, $p );
 
@@ -888,9 +835,29 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		if ( ! empty( $p['images'] ) ) {
 			$this->set_product_images( $id, $p['images'] );
 		}
+		if ( 'WC_Product_Variable' === $wanted_class ) {
+			$this->sync_variations( $id, (int) $p['id'] );
+			WC_Product_Variable::sync( $id );
+		}
+
 		$this->mark_synced( $id );
 		$this->log( 'info', sprintf( 'Utworzono %s: %s (ID=%d, SKU=%s)', $wanted_term, $p['name'], $id, $sku ?: '(brak)' ) );
 		return 'created';
+	}
+
+	/* =====================================================================
+	 *  SIMPLE
+	 * ================================================================== */
+
+	private function upsert_simple( array $p, $dry_run ) {
+		$sku   = $this->require_sku( $p );
+		$found = $this->find_existing_product( $p );
+		if ( '' !== $sku && $found ) {
+			return $this->update_existing_product( $found, 'WC_Product_Simple', 'simple', $p, $dry_run, $sku );
+		} elseif ( '' === $sku && $found ) {
+			return $this->update_existing_product( $found, 'WC_Product_Simple', 'simple', $p, $dry_run, '' );
+		}
+		return $this->create_new_product( 'WC_Product_Simple', 'simple', $p, $dry_run, $sku );
 	}
 
 	/* =====================================================================
@@ -898,7 +865,7 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 	 * ================================================================== */
 
 	private function upsert_variable( array $p, $dry_run ) {
-		$sku = $this->require_sku( $p );
+		$sku   = $this->require_sku( $p );
 		$found = $this->find_existing_product( $p );
 		if ( '' !== $sku && $found ) {
 			return $this->update_existing_product( $found, 'WC_Product_Variable', 'variable', $p, $dry_run, $sku );
@@ -908,71 +875,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		return $this->create_new_product( 'WC_Product_Variable', 'variable', $p, $dry_run, $sku );
 	}
 
-	/** Aktualizuje istniejący produkt z danymi ze źródła. */
-	private function update_existing_product( $existing_id, $wanted_class, $wanted_term, array $p, $dry_run, $sku ) {
-		if ( $dry_run ) {
-			$this->log( 'info', sprintf( '[DRY] UPDATE %s: %s (%s=%s)', $wanted_term, $p['name'], $sku ? 'SKU' : 'nazwa', $sku ?: $p['name'] ) );
-			return 'updated';
-		}
-
-		$product = $this->ensure_product_type( $existing_id, $wanted_class, $wanted_term );
-		$this->apply_common_fields( $product, $p );
-		if ( '' !== $sku ) {
-			$product->set_sku( $sku );
-		}
-		$this->apply_physical( $product, $p );
-		if ( ! empty( $p['stock_status'] ) ) {
-			$product->set_stock_status( $p['stock_status'] );
-		}
-		$product->set_attributes( $this->build_parent_attributes( $p['attributes'] ?? array() ) );
-
-		$id = $product->save();
-		if ( ! $id ) {
-			throw new \RuntimeException( 'save() zwróciło 0' );
-		}
-		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
-		$this->mark_synced( $id );
-		$this->log( 'info', sprintf( 'Zaktualizowano %s: %s (ID=%d)', $wanted_term, $p['name'], $id ) );
-		return 'updated';
-	}
-
-	/** Tworzy nowy produkt i zapisuje go na celzie. */
-	private function create_new_product( $wanted_class, $wanted_term, array $p, $dry_run, $sku ) {
-		if ( $dry_run ) {
-			$vars = $this->fetch_variations( (int) $p['id'] );
-			$this->log( 'info', sprintf( '[DRY] CREATE %s: %s (%s=%s, wariacji=%d)', $wanted_term, $p['name'], 'SKU', $sku ?: '(brak)', count( $vars ) ) );
-			return 'created';
-		}
-
-		$product = new $wanted_class();
-		$this->apply_common_fields( $product, $p );
-		if ( '' !== $sku ) {
-			$product->set_sku( $sku );
-		}
-		$this->apply_physical( $product, $p );
-		if ( ! empty( $p['stock_status'] ) ) {
-			$product->set_stock_status( $p['stock_status'] );
-		}
-		$product->set_attributes( $this->build_parent_attributes( $p['attributes'] ?? array() ) );
-
-		$id = $product->save();
-		if ( ! $id ) {
-			throw new \RuntimeException( 'save() zwróciło 0' );
-		}
-		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
-		if ( ! empty( $p['images'] ) ) {
-			$this->set_product_images( $id, $p['images'] );
-		}
-
-		$this->sync_variations( $id, (int) $p['id'] );
-		WC_Product_Variable::sync( $id ); // przelicz zakresy cen / stock rodzica
-
-		$this->mark_synced( $id );
-		$this->log( 'info', sprintf( 'Utworzono %s: %s (ID=%d, SKU=%s)', $wanted_term, $p['name'], $id, $sku ?: '(brak)' ) );
-		return 'created';
-	}
-
-	/** Buduje atrybuty produktu-rodzica (WC_Product_Attribute[]). */
 	private function build_parent_attributes( array $source_attrs ) {
 		$out = array();
 		$pos = 0;
@@ -980,7 +882,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 			$attr = new WC_Product_Attribute();
 
 			if ( ! empty( $a['id'] ) && (int) $a['id'] > 0 ) {
-				// Atrybut globalny (taksonomia).
 				$map = $this->map_global_attribute( (int) $a['id'] );
 				if ( ! $map ) {
 					continue;
@@ -996,7 +897,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 				$attr->set_name( $map['taxonomy'] );
 				$attr->set_options( $term_ids );
 			} else {
-				// Atrybut lokalny (custom).
 				$attr->set_id( 0 );
 				$attr->set_name( (string) ( $a['name'] ?? '' ) );
 				$attr->set_options( $a['options'] ?? array() );
@@ -1011,10 +911,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		return $out;
 	}
 
-	/**
-	 * Mapuje źródłowy atrybut globalny na taksonomię+ID na celu (tworzy brakujący).
-	 * Zwraca ['taxonomy'=>'pa_...', 'attribute_id'=>int] albo null.
-	 */
 	private function map_global_attribute( $source_attr_id ) {
 		$src = $this->source_attributes[ $source_attr_id ] ?? null;
 		if ( ! $src ) {
@@ -1025,7 +921,7 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 			return $this->attr_map_cache[ $bare ];
 		}
 
-		$taxonomy = wc_attribute_taxonomy_name( $bare ); // 'pa_bare'
+		$taxonomy = wc_attribute_taxonomy_name( $bare );
 		$attr_id  = wc_attribute_taxonomy_id_by_name( $bare );
 
 		if ( ! $attr_id ) {
@@ -1073,7 +969,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		if ( ! is_wp_error( $new ) ) {
 			return (int) $new['term_id'];
 		}
-		// Wyścig: term już istnieje.
 		$data = $new->get_error_data();
 		if ( is_array( $data ) && isset( $data['term_id'] ) ) {
 			return (int) $data['term_id'];
@@ -1082,17 +977,14 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		return 0;
 	}
 
-	/* ---- Wariacje ---- */
-
 	private function sync_variations( $target_parent_id, $source_parent_id ) {
-		$this->variations_fetch_error = false; // reset per-parent
+		$this->variations_fetch_error = false;
 		$source_vars = $this->fetch_variations( $source_parent_id );
 		$parent      = wc_get_product( $target_parent_id );
 		if ( ! $parent ) {
 			return;
 		}
 
-		// Indeks istniejących wariacji: po SKU i po sygnaturze atrybutów.
 		$by_sku = array();
 		$by_sig = array();
 		foreach ( $parent->get_children() as $vid ) {
@@ -1137,7 +1029,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 				$variation->set_attributes( $attrs );
 
 				$new_vid = $variation->save();
-							// Obraz wariacji tylko przy tworzeniu.
 				if ( ! $is_update && ! empty( $sv['image']['src'] ) ) {
 					$att = $this->sideload_single( $sv['image']['src'], $new_vid );
 					if ( $att ) {
@@ -1146,13 +1037,12 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 					}
 				}
 
-			$kept[ $new_vid ] = true;
+				$kept[ $new_vid ] = true;
 			} catch ( \Throwable $e ) {
 				$this->log( 'warning', sprintf( 'Wariacja (SKU=%s) rodzica %d: %s', $sv['sku'] ?? '', $target_parent_id, $e->getMessage() ) );
 			}
 		}
 
-		// Only delete stale variations when fetch succeeded with HTTP 200 on all pages.
 		if ( ! $this->variations_fetch_error ) {
 			foreach ( $parent->get_children() as $vid ) {
 				if ( empty( $kept[ $vid ] ) ) {
@@ -1164,11 +1054,10 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 				}
 			}
 		} else {
-			$this->log( 'warning', sprintf( 'Błąd pobierania wariacji rodzica %d – pomijam usuwanie dzieci (ochrona).', $target_parent_id ) );
+			$this->log( 'warning', sprintf( 'Błąd pobierania wariacji rodzica %d – pomijam usuwanie dzieci.', $target_parent_id ) );
 		}
 	}
 
-	/** Buduje mapę atrybutów wariacji [ klucz => wartość ] dla set_attributes(). */
 	private function build_variation_attributes( array $source_attrs ) {
 		$out = array();
 		foreach ( $source_attrs as $a ) {
@@ -1186,7 +1075,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		return $out;
 	}
 
-	/** Znormalizowana sygnatura kombinacji atrybutów (do dopasowania bez SKU). */
 	private function signature( array $attrs ) {
 		$attrs = array_map( 'strval', $attrs );
 		ksort( $attrs );
@@ -1201,7 +1089,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		$sku         = isset( $p['sku'] ) ? trim( $p['sku'] ) : '';
 		$existing_id = $sku ? wc_get_product_id_by_sku( $sku ) : 0;
 
-		// Grouped często bez SKU – fallback po meta_source_id, potem slug.
 		if ( ! $existing_id && ! empty( $p['id'] ) ) {
 			$found = get_posts( array(
 				'post_type'      => 'product',
@@ -1215,7 +1102,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 				$existing_id = (int) $found[0];
 			}
 		}
-		// Fallback po slug (post_name).
 		if ( ! $existing_id && ! empty( $p['slug'] ) ) {
 			$found = get_posts( array(
 				'post_type'      => 'product',
@@ -1230,7 +1116,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		}
 		$is_update = (bool) $existing_id;
 
-		// Zmapuj dzieci: źródłowe ID -> SKU -> lokalne ID.
 		$child_ids = array();
 		foreach ( ( $p['grouped_products'] ?? array() ) as $child_source_id ) {
 			$child_sku = $this->source_id_to_sku[ (int) $child_source_id ] ?? '';
@@ -1340,7 +1225,6 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 	 *  Soft-delete
 	 * ================================================================== */
 
-	/** Oznacza produkt jako zarządzany przez sync; jeśli wrócił ze źródła – zdejmuje soft-delete. */
 	private function mark_synced( $product_id ) {
 		update_post_meta( $product_id, self::META_SYNCED, time() );
 		if ( get_post_meta( $product_id, self::META_SOFT_DELETED, true ) ) {
@@ -1366,13 +1250,9 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		return ( is_array( $data ) && isset( $data['term_id'] ) ) ? (int) $data['term_id'] : 0;
 	}
 
-/**
-	 * Ustawia jako szkic produkty zarządzane, których klucza (SKU lub nazwy) nie ma już w źródle.
-	 * Nie rusza produktów spoza sync i nie działa, gdy pobieranie źródła miało błąd.
-	 */
 	private function soft_delete_missing( array $source_keys, $source_count, $dry_run ) {
 		if ( $this->fetch_had_error ) {
-			$this->log( 'warning', 'Pobieranie źródła miało błąd – pomijam soft-delete (ochrona przed masowym zdraftowaniem).' );
+			$this->log( 'warning', 'Pobieranie źródła miało błąd – pomijam soft-delete.' );
 			return;
 		}
 		if ( $source_count < 1 ) {
@@ -1380,11 +1260,9 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 			return;
 		}
 
-		$source_keys_set = array_flip( $source_keys ); // ['klucz' => true] dla szybkiego lookupu
+		$source_keys_set = array_flip( $source_keys );
 
-		// get_soft_delete_tag_id creates a term → only resolve lazily in non-dry path.
 		$tag_id = 0;
-
 		$candidates = array();
 		$page       = 1;
 
@@ -1413,13 +1291,12 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 				if ( ! $product ) {
 					continue;
 				}
-				// Klucz do porównania: SKU albo nazwa.
 				$match_sku  = $product->get_sku();
 				$match_name = $product->get_name();
 				$match_key  = ( '' !== $match_sku ) ? $match_sku : $match_name;
 
 				if ( '' === $match_key ) {
-					continue; // ani SKU ani nazwa – nie umiemy dopasować.
+					continue;
 				}
 				if ( ! isset( $source_keys_set[ $match_key ] ) ) {
 					$candidates[] = $pid;
@@ -1447,7 +1324,7 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 				$this->log( 'info', sprintf( '[DRY] SOFT-DELETE → draft: %s (ID=%d, klucz=%s)', $product->get_name(), $pid, $match_key ) );
 				continue;
 			}
-			$tag_id = $this->get_soft_delete_tag_id(); // lazily resolve in non-dry path only
+			$tag_id = $this->get_soft_delete_tag_id();
 			$product->set_status( 'draft' );
 			$product->save();
 			update_post_meta( $pid, self::META_SOFT_DELETED, time() );
@@ -1460,14 +1337,12 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		$this->enforce_soft_delete_limit( $dry_run );
 	}
 
-	/** Trwale usuwa najstarsze szkice soft-delete ponad limit. */
 	private function enforce_soft_delete_limit( $dry_run ) {
 		$limit = (int) $this->get_options()['soft_delete_limit'];
 		if ( $limit < 1 ) {
-			return; // 0 = bez limitu
+			return;
 		}
 
-		// Use get_posts for proper meta ordering (wc_get_products ignores orderby+meta_key).
 		$ids = get_posts( array(
 			'fields'         => 'ids',
 			'post_type'      => 'product',
@@ -1490,13 +1365,13 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		}
 
 		$to_delete = array_slice( $ids, 0, $excess );
-		$this->log( 'info', sprintf( 'Limit szkiców = %d, nadwyżka = %d – trwałe usunięcie najstarszych.', $limit, $excess ) );
+		$this->log( 'info', sprintf( 'Limit szkiców = %d, nadwyżka = %d.', $limit, $excess ) );
 
 		foreach ( $to_delete as $pid ) {
 			$product = wc_get_product( $pid );
 			$name    = $product ? $product->get_name() : '';
 			if ( $dry_run ) {
-				$this->log( 'info', sprintf( '[DRY] TRWALE USUŃ (poza limitem): %s (ID=%d)', $name, $pid ) );
+				$this->log( 'info', sprintf( '[DRY] TRWALE USUŃ: %s (ID=%d)', $name, $pid ) );
 				continue;
 			}
 			if ( $product ) {
@@ -1504,13 +1379,10 @@ $out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 			} else {
 				wp_delete_post( $pid, true );
 			}
-			$this->log( 'info', sprintf( 'Trwale usunięto (poza limitem): %s (ID=%d)', $name, $pid ) );
+			$this->log( 'info', sprintf( 'Trwale usunięto: %s (ID=%d)', $name, $pid ) );
 		}
 	}
 
-	/** Decyduje czy produkt o danym statusie źródłowym powinien być synchronizowany.
-	 * Domyślnie: tylko 'publish'. Użytkownik może nadpisać przez filtr 'wps_sync_statuses'.
-	 */
 	private function should_sync_status( $source_status ) {
 		$allowed = apply_filters( 'wps_sync_statuses', array( 'publish' ), $source_status );
 		return in_array( $source_status, (array) $allowed, true );
