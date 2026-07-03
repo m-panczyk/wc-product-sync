@@ -718,12 +718,11 @@ final class WC_Product_Sync {
 		return $id ? absint( $id ) : 0;
 	}
 
-	/**
-	 * Szuka istniejącego produktu na celzie: najpierw po SKU, potem po source_id,
+/**
+	 * Szuka istniejącego produktu na celcu: najpierw po SKU, potem po source_id,
 	 * na końcu po nazwie (fallback).
 	 */
 	private function find_existing_product( array $p ) {
-		global $wpdb;
 
 		$sku = $this->require_sku( $p );
 		if ( '' !== $sku ) {
@@ -743,13 +742,13 @@ final class WC_Product_Sync {
 		}
 
 		// 3) Fallback: szukaj po nazwie.
-		//    Działa dla produktów, które nie mają _wps_source_id (np. ręcznie
-		//    utworzone na celcu o tej samej nazwie). Jeśli produkt ma już
-		//    _wps_source_id ale NIE pasuje do źródła, traktujemy go jako
-		//    inny produkt i tworzymy nowy — nie podmieniamy cudzego.
+		//    Tylko jeśli znaleziony produkt jest nieprzypisany (brak _wps_source_id)
+		//    lub przypisany do tego samego źródła — w przeciwnym razie to inny
+		//    produkt o tej samej nazwie, nie nasz.
 		$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
-		if ( '' !== $name ) {
-			$found = get_posts( array(
+		if ( '' !== $name && ! empty( $p['id'] ) ) {
+			$src_id  = absint( $p['id'] );
+			$found   = get_posts( array(
 				'post_type'      => 'product',
 				'post_title'     => $name,
 				'post_status'    => 'publish',
@@ -757,7 +756,12 @@ final class WC_Product_Sync {
 				'fields'         => 'ids',
 			) );
 			if ( $found && count( $found ) === 1 ) {
-				return (int) $found[0];
+				$pid = (int) $found[0];
+				$existing_src = get_post_meta( $pid, self::META_SOURCE_ID, true );
+				// Dopuszczamy jeśli produkt jest nieprzypisany lub należy do tego samego źródła.
+				if ( '' === $existing_src || (string) $existing_src === (string) $src_id ) {
+					return $pid;
+				}
 			}
 		}
 
