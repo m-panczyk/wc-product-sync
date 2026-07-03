@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.6.0
+ * Version:           0.7.0
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -27,7 +27,8 @@ final class WC_Product_Sync {
 	const CRON_HOOK       = 'wc_product_sync_daily_event';
 	const LOG_SOURCE      = 'wc-product-sync';
 	const NONCE_ACTION    = 'wc_product_sync_run';
-	const SYNC_LOCK_TRANSIENT = 'wps_sync_running';
+	const SYNC_LOCK_TRANSIENT  = 'wps_sync_running';
+	const SYNC_PROGRESS_TRANSIENT = 'wps_sync_progress';
 
 	// Soft-delete
 	const META_SYNCED       = '_wps_synced';
@@ -49,6 +50,8 @@ final class WC_Product_Sync {
 	private $fetch_had_error = false;
 	/** Czy pobieranie wariacji napotkało błąd (blokada usunięć) */
 	private $variations_fetch_error = false;
+	/** Ostatnie nagłówki odpowiedzi REST API (X-WP-TotalPages) */
+	private $last_api_headers = array();
 
 	public static function instance() {
 		if ( null === self::$instance ) {
@@ -61,6 +64,8 @@ final class WC_Product_Sync {
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 		add_action( 'admin_post_wc_product_sync_run', array( $this, 'handle_manual_run' ) );
+		add_action( 'admin_post_wc_product_sync_continue', array( $this, 'handle_continue_sync' ) );
+		add_action( 'admin_post_wc_product_sync_cancel', array( $this, 'handle_cancel_sync' ) );
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
 		add_action( 'admin_notices', array( $this, 'maybe_wc_missing_notice' ) );
 	}
@@ -115,22 +120,59 @@ final class WC_Product_Sync {
 	}
 
 	/* =====================================================================
+	 *  Progress tracking (batching + resume)
+	 * ================================================================== */
+
+	private function save_sync_progress( $current_page, $products_processed, $total_products ) {
+		set_transient( self::SYNC_PROGRESS_TRANSIENT, array(
+			'current_page'      => absint( $current_page ),
+			'products_processed' => absint( $products_processed ),
+			'total_products'    => absint( $total_products ),
+			'started_at'        => time(),
+		), 900 );
+	}
+
+	private function get_sync_progress() {
+		return get_transient( self::SYNC_PROGRESS_TRANSIENT );
+	}
+
+	private function clear_sync_progress() {
+		delete_transient( self::SYNC_PROGRESS_TRANSIENT );
+	}
+
+	private function cancel_sync() {
+		delete_transient( self::SYNC_LOCK_TRANSIENT );
+		$this->clear_sync_progress();
+		$this->log( 'info', 'Synchronizacja anulowana przez użytkownika.' );
+	}
+
+	private function format_duration( $seconds ) {
+		if ( $seconds < 60 ) return floor( $seconds ) . 's';
+		$minutes = floor( $seconds / 60 );
+		if ( $minutes < 60 ) return $minutes . 'm' . ($seconds % 60 > 0 ? ' ' . ($seconds % 60) . 's' : '');
+		$hours = floor( $minutes / 60 );
+		$min = $minutes % 60;
+		return $hours . 'h ' . $min . 'm';
+	}
+
+	/* =====================================================================
 	 *  Konfiguracja
 	 * ================================================================== */
 
 	private function get_options() {
-		$defaults = array(
-			'source_url'          => '',
-			'consumer_key'        => '',
-			'consumer_secret'     => '',
-			'per_page'            => 100,
-			'schedule_enabled'    => 0,
-			'soft_delete_enabled' => 0,
-			'soft_delete_limit'   => 50,
-			'cron_hour'           => 3,
-			'cron_minute'         => 0,
-			'force_full_sync'     => 0,
-		);
+$defaults = array(
+		'source_url'          => '',
+		'consumer_key'        => '',
+		'consumer_secret'     => '',
+		'per_page'            => 100,
+		'sync_batch_limit'    => 200, // 0 = no limit (legacy), recommended: 200-500 products
+		'schedule_enabled'    => 0,
+		'soft_delete_enabled' => 0,
+		'soft_delete_limit'   => 50,
+		'cron_hour'           => 3,
+		'cron_minute'         => 0,
+		'force_full_sync'     => 0,
+	);
 		return wp_parse_args( get_option( self::OPTION_KEY, array() ), $defaults );
 	}
 
@@ -182,8 +224,11 @@ final class WC_Product_Sync {
 		if ( isset( $input['consumer_secret'] ) ) {
 			$out['consumer_secret']  = sanitize_text_field( trim( $input['consumer_secret'] ) );
 		}
-		if ( isset( $input['per_page'] ) ) {
+	if ( isset( $input['per_page'] ) ) {
 			$out['per_page']         = max( 1, min( 100, (int) $input['per_page'] ) );
+		}
+		if ( isset( $input['sync_batch_limit'] ) ) {
+			$out['sync_batch_limit'] = max( 0, (int) $input['sync_batch_limit'] ); // 0 = unlimited (legacy)
 		}
 		$out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		$out['soft_delete_enabled'] = empty( $input['soft_delete_enabled'] ) ? 0 : 1;
@@ -236,6 +281,51 @@ final class WC_Product_Sync {
 		$next    = wp_next_scheduled( self::CRON_HOOK );
 		$run_url = wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_run&mode=run' ), self::NONCE_ACTION );
 		$dry_url = wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_run&mode=dry' ), self::NONCE_ACTION );
+		$progress = $this->get_sync_progress();
+
+		// Render progress section if sync is in progress
+		if ( $progress ) {
+			$start_time = $progress['started_at'];
+			$elapsed    = time() - $start_time;
+			$processed  = $progress['products_processed'];
+			$total      = max( $progress['total_products'], $processed );
+			$page       = $progress['current_page'];
+			$per_page   = (int) $this->cfg_per_page();
+			$pages_done = min( $page, 999999 );
+			$percent    = $total > 0 ? round( $processed / max( $total, 1 ) * 100, 1 ) : 0;
+
+			// ETA: simple linear extrapolation
+			if ( $elapsed > 5 ) {
+				$rate_per_sec = $processed / $elapsed;
+				$remaining    = max( 0, $total - $processed );
+				$eta_seconds  = (int) ( $remaining / $rate_per_sec );
+			} else {
+				$eta_seconds  = '?';
+			}
+
+			echo '<div class="notice notice-info" style="padding:15px; margin-bottom:20px;">';
+			echo '<h3 style="margin:0 0 10px;">Synchronizacja w toku</h3>';
+			echo '<div style="background:#e5e5e5; border-radius:4px; height:24px; margin-bottom:8px; overflow:hidden;">';
+			echo '<div style="background:#2271b1; height:100%; width:' . esc_attr( $percent ) . '%; transition:width 0.3s;"></div>';
+			echo '</div>';
+			printf( '<p><strong>%d</strong> / <strong>%d</strong> produktów (%.1f%%) — strona %d/%s</p>',
+				$processed, $total, $percent, $page, esc_html( '?' ) );
+			echo '<p>Czas pracy: <strong>' . esc_html( $this->format_duration( $elapsed ) ) . '</strong>';
+			if ( is_numeric( $eta_seconds ) ) {
+				echo ', szacowany czas zakończenia: <strong>' . esc_html( $this->format_duration( $eta_seconds ) ) . '</strong>';
+			}
+			echo '</p>';
+
+			printf( '<p><a href="%s" class="button button-secondary" style="margin-right:8px;">Kontynuuj</a>',
+				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_continue' ), self::NONCE_ACTION ) );
+			printf( '<a href="%s" class="button button-link-danger" onclick="return confirm(\'Anulować synchronizację?\');">Anuluj</a>',
+				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_cancel' ), self::NONCE_ACTION . '_cancel' ) );
+			echo '</p>';
+			echo '</div>';
+		} else {
+			echo '<!-- no progress -->';
+		}
+
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Synchronizacja produktów WooCommerce', 'wc-product-sync' ); ?></h1>
@@ -251,6 +341,10 @@ final class WC_Product_Sync {
 						(int) ( $_GET['errors'] ?? 0 )
 					);
 					?>
+				</p></div>
+			<?php elseif ( isset( $_GET['cancelled'] ) ) : ?>
+				<div class="notice notice-warning is-dismissible"><p>
+					<?php esc_html_e( 'Synchronizacja anulowana. Postęp nie został zapisany — produkty przetwarzane w tym batchu mogą wymagać ponownego przetworzenia.', 'wc-product-sync' ); ?>
 				</p></div>
 			<?php endif; ?>
 
@@ -281,11 +375,17 @@ final class WC_Product_Sync {
 							<p class="description"><?php esc_html_e( 'Zalecane: trzymaj klucze w wp-config.php, nie w bazie.', 'wc-product-sync' ); ?></p>
 						</td>
 					</tr>
-					<tr>
-						<th scope="row"><label for="wps_pp"><?php esc_html_e( 'Produktów na stronę', 'wc-product-sync' ); ?></label></th>
-						<td><input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[per_page]" id="wps_pp" type="number" min="1" max="100" class="small-text"
-							value="<?php echo esc_attr( $opts['per_page'] ); ?>" /></td>
-					</tr>
+<tr>
+					<th scope="row"><label for="wps_pp"><?php esc_html_e( 'Produktów na stronę', 'wc-product-sync' ); ?></label></th>
+					<td><input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[per_page]" id="wps_pp" type="number" min="1" max="100" class="small-text"
+						value="<?php echo esc_attr( $opts['per_page'] ); ?>" /></td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="wps_blim"><?php esc_html_e( 'Limit produktów na batch', 'wc-product-sync' ); ?></label></th>
+					<td><input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[sync_batch_limit]" id="wps_blim" type="number" min="0" class="small-text"
+						value="<?php echo esc_attr( $opts['sync_batch_limit'] ); ?>" />
+						<p class="description"><?php esc_html_e( 'Po tej liczbie produktów sync się zatrzyma — kliknij "Kontynuuj" w UI. 0 = bez limitu (legacy, wolne).', 'wc-product-sync' ); ?></p></td>
+				</tr>
 					<tr>
 						<th scope="row"><?php esc_html_e( 'Harmonogram', 'wc-product-sync' ); ?></th>
 						<td>
@@ -396,6 +496,51 @@ final class WC_Product_Sync {
 		exit;
 	}
 
+	public function handle_continue_sync() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( esc_html__( 'Brak uprawnień.', 'wc-product-sync' ) );
+		}
+		check_admin_referer( self::NONCE_ACTION );
+
+		$progress = $this->get_sync_progress();
+		if ( ! $progress ) {
+			wp_safe_redirect( admin_url( 'admin.php?page=wc-product-sync' ) );
+			exit;
+		}
+
+		if ( function_exists( 'ignore_user_abort' ) ) {
+			@ignore_user_abort( true );
+		}
+
+		// Clear the existing lock so run_sync() can set a fresh one
+		delete_transient( self::SYNC_LOCK_TRANSIENT );
+		$stats = $this->run_sync( false );
+
+		wp_safe_redirect( add_query_arg(
+			array(
+				'page'    => 'wc-product-sync',
+				'synced'  => 1,
+				'created' => $stats['created'],
+				'updated' => $stats['updated'],
+				'skipped' => $stats['skipped'],
+				'errors'  => $stats['errors'],
+			),
+			admin_url( 'admin.php' )
+		) );
+		exit;
+	}
+
+	public function handle_cancel_sync() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( esc_html__( 'Brak uprawnień.', 'wc-product-sync' ) );
+		}
+		check_admin_referer( self::NONCE_ACTION . '_cancel' );
+
+		$this->cancel_sync();
+		wp_safe_redirect( admin_url( 'admin.php?page=wc-product-sync&cancelled=1' ) );
+		exit;
+	}
+
 	public function run_sync_cron() {
 		$this->run_sync( false );
 	}
@@ -422,6 +567,9 @@ final class WC_Product_Sync {
 				sleep( min( 30, pow( 2, $attempt ) ) );
 				continue;
 			}
+
+			// Store headers for progress tracking (X-WP-TotalPages)
+			$this->last_api_headers = wp_remote_retrieve_headers( $response );
 
 			$code = (int) wp_remote_retrieve_response_code( $response );
 			if ( 200 === $code ) {
@@ -547,25 +695,27 @@ final class WC_Product_Sync {
 			return $stats;
 		}
 
-		if ( get_transient( self::SYNC_LOCK_TRANSIENT ) ) {
-			$this->log( 'warning', 'Synchronizacja już trwa (blokada transient) – przerywam.' );
-			return $stats;
+		// Check if there's a pending batch resume
+		$progress = $this->get_sync_progress();
+		if ( $progress && empty( $_GET['mode'] ) ) {
+			$this->log( 'info', sprintf( 'Wznowienie z %d/%d produktów, strona %d', $progress['products_processed'], $progress['total_products'], $progress['current_page'] ) );
 		}
 
 		if ( function_exists( 'set_time_limit' ) ) {
-			@set_time_limit( 600 );
+			@set_time_limit( 900 );
 		}
 
-		set_transient( self::SYNC_LOCK_TRANSIENT, time(), 900 );
+		set_transient( self::SYNC_LOCK_TRANSIENT, time(), 1800 );
 
 		try {
-			return $this->run_sync_inner( $dry_run, $stats );
+			return $this->run_sync_inner( $dry_run, $stats, $progress );
 		} finally {
 			delete_transient( self::SYNC_LOCK_TRANSIENT );
+			$this->clear_sync_progress();
 		}
 	}
 
-	private function run_sync_inner( $dry_run, &$stats ) {
+	private function run_sync_inner( $dry_run, &$stats, $progress = null ) {
 		$this->log( 'info', '=== Start synchronizacji' . ( $dry_run ? ' [DRY RUN]' : '' ) . ' ===' );
 
 		// Pełna synchronizacja – usuń stare lokalne produkty.
@@ -593,44 +743,110 @@ final class WC_Product_Sync {
 		$this->source_id_to_sku = array();
 		$this->fetch_had_error  = false;
 
+		$per_page = $this->cfg_per_page();
+		$batch_limit = (int) $this->get_options()['sync_batch_limit']; // 0 = unlimited
+		$page = $progress ? $progress['current_page'] : 1;
+		$products_processed = $progress ? $progress['products_processed'] : 0;
+
 		$this->source_attributes = $this->fetch_source_attributes();
 
-		$source_count = 0;
-		$source_keys  = array();
-		$grouped_buf  = array();
+		$total_counted = 0;
+		$source_keys   = array();
+		$grouped_buf   = array();
+		$total_pages   = 0;
 
-		$this->foreach_product( function( $p ) use ( &$stats, &$source_count, &$source_keys, &$grouped_buf, $dry_run ) {
-			$source_count++;
+		do {
+			$batch = $this->fetch_product_page( $page );
+			if ( is_wp_error( $batch ) ) {
+				$this->fetch_had_error = true;
+				$this->log( 'error', 'Pobieranie strony ' . $page . ': ' . $batch->get_error_message() );
+				break;
+			}
 
-			$sku = isset( $p['sku'] ) ? trim( $p['sku'] ) : '';
-			if ( '' !== $sku ) {
-				$this->source_id_to_sku[ (int) $p['id'] ] = $sku;
-				$source_keys[]                             = $sku;
-			} else {
-				$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
-				if ( '' !== $name ) {
-					$source_keys[] = $name;
+			$count = count( $batch );
+			if ( 0 === $count ) {
+				break;
+			}
+
+			// Capture total pages from WC REST API header on first page
+			if ( 1 === $page ) {
+				if ( isset( $this->last_api_headers['X-WP-TotalPages'] ) ) {
+					$total_pages = absint( $this->last_api_headers['X-WP-TotalPages'] );
+				} elseif ( isset( $this->last_api_headers['x-wp-totalpages'] ) ) {
+					$total_pages = absint( $this->last_api_headers['x-wp-totalpages'] );
 				}
 			}
 
-			if ( isset( $p['type'] ) && 'grouped' === $p['type'] ) {
-				$grouped_buf[] = $p;
-			} else {
-				$this->process_single_product( $p, $dry_run, $stats );
+			$total_counted += $count;
+			$this->log( 'info', sprintf( 'Strona %d/%d (%d produktów)', $page, $total_pages ?: '?', $count ) );
+
+			foreach ( $batch as $p ) {
+				$products_processed++;
+
+				// Batch limit check — save progress and stop if we've hit the limit
+				if ( $batch_limit > 0 && $products_processed > $batch_limit ) {
+					$this->save_sync_progress( $page, $products_processed - 1, $total_counted );
+					$this->log( 'info', sprintf( 'Limit batchu (%d produktów) osiągnięty — wznowienie z %d,% strona %d.', $batch_limit, $products_processed - 1, $page ) );
+					return $stats;
+				}
+
+				// Track source keys
+				$sku = isset( $p['sku'] ) ? trim( $p['sku'] ) : '';
+				if ( '' !== $sku ) {
+					$this->source_id_to_sku[ (int) $p['id'] ] = $sku;
+					$source_keys[]                             = $sku;
+				} else {
+					$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
+					if ( '' !== $name ) {
+						$source_keys[] = $name;
+					}
+				}
+
+				// Grouped products buffered, others processed immediately
+				if ( isset( $p['type'] ) && 'grouped' === $p['type'] ) {
+					$grouped_buf[] = $p;
+				} else {
+					$this->process_single_product( $p, $dry_run, $stats );
+				}
+
+				// Update progress every 10 products (avoid transient thrashing)
+				if ( $products_processed % 10 === 0 ) {
+					$this->save_sync_progress( $page, $products_processed, $total_counted );
+				}
 			}
-		} );
 
-		$this->log( 'info', sprintf( 'Pobrano %d produktów, %d atrybutów globalnych', $source_count, count( $this->source_attributes ) ) );
+			unset( $batch );
+			$page++;
+		} while ( $count === $per_page );
 
+		// Process grouped products
 		foreach ( $grouped_buf as $p ) {
+			$products_processed++;
+			if ( $batch_limit > 0 && $products_processed > $batch_limit ) {
+				$this->save_sync_progress( $page, $products_processed - 1, $total_counted );
+				$this->log( 'info', sprintf( 'Limit batchu (%d) osiągnięty przy grouped: %s.', $batch_limit, $p['name'] ?? '?' ) );
+				return $stats;
+			}
 			$this->process_single_product( $p, $dry_run, $stats );
 		}
-		unset( $grouped_buf );
+
+		// If we completed all pages, clear progress (full sync done)
+		if ( $count < $per_page && 0 !== $total_pages ) {
+			$this->log( 'info', sprintf( 'Wszystkie %d strony przetworzone.', $page - 1 ) );
+			// Don't clear progress yet — wait for soft_delete check to finish
+		}
+
 		if ( function_exists( 'gc_collect_cycles' ) ) gc_collect_cycles();
 
-		if ( ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
-			$this->soft_delete_missing( array_unique( $source_keys ), $source_count, $dry_run );
+		// Soft-delete check (only if sync completed)
+		if ( empty( $progress ) && ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
+			$this->soft_delete_missing( array_unique( $source_keys ), $total_counted, $dry_run );
 		}
+
+		// Final progress update for completed sync
+		$this->clear_sync_progress();
+
+		$this->log( 'info', sprintf( 'Pobrano %d produktów, %d atrybutów globalnych', $total_counted, count( $this->source_attributes ) ) );
 
 		$this->log( 'info', sprintf(
 			'=== Koniec: utworzono=%d, zaktualizowano=%d, pominięto=%d, błędy=%d ===',
@@ -1445,24 +1661,6 @@ final class WC_Product_Sync {
 		$allowed = apply_filters( 'wps_sync_statuses', array( 'publish' ), $source_status );
 		return in_array( $source_status, (array) $allowed, true );
 	}
-
-	/** Resolve SKU → product ID via direct SQL — bypasses all WC
-	 *  caching layers (deferred indexing in v9+, object cache, etc.).
-	 *  Always reads fresh data from the database. */
-	private static function sku_to_id( $sku ) {
-		global $wpdb;
-		if ( '' === trim( $sku ) ) {
-			return 0;
-		}
-		$id = $wpdb->get_var(
-			$wpdb->prepare(
-				"SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_sku' AND meta_value = %s LIMIT 1",
-				trim( $sku )
-			)
-		);
-		return $id ? absint( $id ) : 0;
-	}
-
 	/* =====================================================================
 	 *  Logi
 	 * ================================================================== */
