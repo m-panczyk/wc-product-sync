@@ -681,13 +681,50 @@ final class WC_Product_Sync {
 		return $sku;
 	}
 
-/**
-	 * Szuka istniejącego produktu na celzie: najpierw po SKU, potem po source_id, na końcu po nazwie.
+/** Resolve SKU → product ID via direct SQL — bypasses all WC caching layers
+	 * (deferred indexing in v9+, object cache, etc.). Mirrors WooCommerce\'s own
+	 * sku lookup semantics: only active products/variation rows. */
+	private static function sku_to_id( $sku ) {
+		global $wpdb;
+		if ( '' === trim( $sku ) ) {
+			return 0;
+		}
+		$id = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT p.ID FROM {$wpdb->posts} p
+				 INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+				 WHERE pm.meta_key = '_sku' AND pm.meta_value = %s
+				   AND p.post_type IN ('product','product_variation')
+				   AND p.post_status <> 'trash'
+			   ORDER BY p.ID ASC LIMIT 1",
+				trim( $sku )
+			)
+		);
+		return $id ? absint( $id ) : 0;
+	}
+
+	/** Resolve local product ID by source WooCommerce ID. */
+	private static function source_id_to_local( int $src_id ) {
+		global $wpdb;
+		$id = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT post_id FROM {$wpdb->postmeta}
+				 WHERE meta_key = %s AND meta_value = %s
+			   ORDER BY post_id ASC LIMIT 1",
+				self::META_SOURCE_ID,
+				(string) $src_id
+			)
+		);
+		return $id ? absint( $id ) : 0;
+	}
+
+	/**
+	 * Szuka istniejącego produktu na celzie: najpierw po SKU, potem po source_id,
+	 * na końcu po nazwie (fallback).
 	 */
 	private function find_existing_product( array $p ) {
 		global $wpdb;
 
-		// 1) Lookup po SKU — bezpośrednie zapytanie SQL (bypass WC cache).
 		$sku = $this->require_sku( $p );
 		if ( '' !== $sku ) {
 			$id = self::sku_to_id( $sku );
@@ -699,35 +736,28 @@ final class WC_Product_Sync {
 		// 2) Lookup po source_id z bazy — 100% trafne.
 		if ( ! empty( $p['id'] ) ) {
 			$src_id = absint( $p['id'] );
-			$id = $wpdb->get_var(
-				$wpdb->prepare(
-					"SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value = %d LIMIT 1",
-					self::META_SOURCE_ID,
-					$src_id
-				)
-			);
+			$id     = self::source_id_to_local( $src_id );
 			if ( $id ) {
-				return absint( $id );
+				return $id;
 			}
 		}
 
-		// 3) Fallback: szukaj po nazwie — TYLKO jeśli produkt ma _wps_source_id
-		//    które PASUJE do aktualnego source_id. Zapobiega błędom fuzzy matchingu WooCommerce.
+		// 3) Fallback: szukaj po nazwie.
+		//    Działa dla produktów, które nie mają _wps_source_id (np. ręcznie
+		//    utworzone na celcu o tej samej nazwie). Jeśli produkt ma już
+		//    _wps_source_id ale NIE pasuje do źródła, traktujemy go jako
+		//    inny produkt i tworzymy nowy — nie podmieniamy cudzego.
 		$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
-		if ( '' !== $name && ! empty( $p['id'] ) ) {
+		if ( '' !== $name ) {
 			$found = get_posts( array(
 				'post_type'      => 'product',
 				'post_title'     => $name,
-				'post_status'    => 'any',
-				'posts_per_page' => 5,
+				'post_status'    => 'publish',
+				'posts_per_page' => 2,
 				'fields'         => 'ids',
 			) );
 			if ( $found && count( $found ) === 1 ) {
-				$pid = (int) $found[0];
-				$found_source_id = get_post_meta( $pid, self::META_SOURCE_ID, true );
-				if ( $found_source_id && absint( $found_source_id ) === $src_id ) {
-					return $pid;
-				}
+				return (int) $found[0];
 			}
 		}
 
