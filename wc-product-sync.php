@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.6
+ * Version:           0.9.7
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -88,6 +88,19 @@ final class WC_Product_Sync {
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
 		add_action( self::RESUME_HOOK, array( $this, 'run_resume_batch' ) );
 		add_action( 'admin_notices', array( $this, 'maybe_wc_missing_notice' ) );
+		// Allow image sideloading from the configured source host even if it's a private/LAN
+		// IP: WP's SSRF guard (wp_http_validate_url) otherwise blocks download_url() for
+		// RFC1918 hosts, so products would sync without images against a LAN/staging source.
+		add_filter( 'http_request_host_is_external', array( $this, 'allow_source_host' ), 10, 2 );
+	}
+
+	/** Treat the admin-configured source host as external so its images can be sideloaded. */
+	public function allow_source_host( $is_external, $host ) {
+		$src = wp_parse_url( $this->cfg_source_url(), PHP_URL_HOST );
+		if ( $src && strtolower( (string) $host ) === strtolower( (string) $src ) ) {
+			return true;
+		}
+		return $is_external;
 	}
 
 	/* =====================================================================
