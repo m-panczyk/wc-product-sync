@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.8.3
+ * Version:           0.8.4
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -422,13 +422,13 @@ $defaults = array(
 			$total_pages = isset( $progress['total_pages'] ) ? (int) $progress['total_pages'] : 0;
 			$percent     = $total > 0 ? round( $processed / max( $total, 1 ) * 100, 1 ) : 0;
 
-			// ETA: simple linear extrapolation
-			if ( $elapsed > 5 ) {
-				$rate_per_sec = $processed / $elapsed;
-				$remaining    = max( 0, $total - $processed );
-				$eta_seconds  = (int) ( $remaining / $rate_per_sec );
+			// ETA: simple linear extrapolation. Requires $processed > 0 (the "starting" state
+			// has 0 processed, which would divide by a zero rate → fatal on PHP 8).
+			if ( $elapsed > 5 && $processed > 0 ) {
+				$remaining   = max( 0, $total - $processed );
+				$eta_seconds = (int) ( $remaining * $elapsed / $processed );
 			} else {
-				$eta_seconds  = '?';
+				$eta_seconds = '?';
 			}
 
 			// "Starting" state: seeded transient before the first page has been fetched.

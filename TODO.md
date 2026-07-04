@@ -1,6 +1,6 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.8.3** (background manual run + live progress UI)
+Current version: **0.8.4** (background manual run + live progress UI; 0.8.3 render crash hotfix)
 Target file: `wc-product-sync.php` (single-file WordPress plugin).
 
 General rules for the agent:
@@ -40,6 +40,14 @@ final batch clears progress, flips `running=false`, and the idle page shows
 **Note:** relies on WP-Cron (loopback) to fire the kickoff — enabled here (`DISABLE_WP_CRON` unset). On
 hosts with WP-Cron disabled the run starts on the next page load instead (seed keeps showing "Uruchamianie").
 This also supersedes TODO **N2** for the run action (dry still uses a GET link).
+
+**0.8.4 HOTFIX — render_admin_page DivisionByZeroError (critical error / WSOD):** the new "starting"
+state has `products_processed = 0`; the ETA calc `remaining / ($processed/$elapsed)` divided by a zero
+rate → fatal on PHP 8 once `elapsed > 5s`. (The ETA was also computed before the `$is_starting` branch,
+so it ran even though the starting view doesn't show ETA.) Guarded with `$processed > 0` and rewrote as
+`remaining * elapsed / processed`. Verified: starting state with `elapsed>5` renders; running-state ETA
+computes; idle OK. The pre-existing latent bug never fired before because progress was only saved with
+`processed >= per_page`.
 
 ---
 
