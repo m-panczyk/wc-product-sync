@@ -1,6 +1,6 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.8.2** (auto-batching v0.8.1 + batch loop fixes)
+Current version: **0.8.3** (background manual run + live progress UI)
 Target file: `wc-product-sync.php` (single-file WordPress plugin).
 
 General rules for the agent:
@@ -10,6 +10,36 @@ General rules for the agent:
 - Do not change the public behavior contract except where a task says so.
 
 **Already done — do not redo** (see git history for details): C1–C4, M1, M2, M3, M4, M5, N8, N11.
+
+---
+
+## v0.8.3 UX — background manual run + live progress (2026-07-04)
+
+**Problem reported by owner:** clicking "Synchronizuj teraz" gave no feedback — `handle_manual_run()`
+ran the whole sync synchronously in the request, blocking the browser for minutes (image sideload)
+before redirecting, and the settings-page progress notice was only reachable afterwards and static.
+
+**Fix (chosen: background + live progress):**
+- Real run no longer runs in the request. `handle_manual_run()` seeds a "starting" progress transient,
+  resets the cumulative result, schedules an immediate one-off `CRON_HOOK` event, calls `spawn_cron()`,
+  and redirects instantly to `?started=1`. Dry run stays synchronous (its point is the count report).
+- New `seed_sync_progress()` (current_page=0 = fresh first batch), `reset_run_result()` /
+  `accumulate_run_result()` (cumulative counts across batches in option `wps_last_sync_result`).
+- `run_sync_inner()`: force_full and single-pass soft-delete now key off `$is_first_batch`
+  (`empty($progress) || current_page < 1`) so the seed transient doesn't disable them.
+- Progress notice: "starting" spinner state before page 1, real bar afterwards, and an 8s JS
+  auto-refresh emitted only while a sync is active (stops itself on completion).
+- Completion notice (option-based) shows cumulative "utworzono/zaktualizowano/…" when the auto-refresh
+  lands the user on the idle page.
+
+**Verified live (docker):** starting state renders spinner + auto-refresh; cron batch 1 advances the
+bar to `strona 1/5` with exact totals and `started_at` preserved; result accumulates across batches;
+final batch clears progress, flips `running=false`, and the idle page shows
+"Synchronizacja zakończona … Utworzono: 14, zaktualizowano: 78, …". Environment restored afterwards.
+
+**Note:** relies on WP-Cron (loopback) to fire the kickoff — enabled here (`DISABLE_WP_CRON` unset). On
+hosts with WP-Cron disabled the run starts on the next page load instead (seed keeps showing "Uruchamianie").
+This also supersedes TODO **N2** for the run action (dry still uses a GET link).
 
 ---
 

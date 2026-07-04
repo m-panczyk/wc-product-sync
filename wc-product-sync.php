@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.8.2
+ * Version:           0.8.3
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -30,6 +30,7 @@ final class WC_Product_Sync {
 	const NONCE_ACTION     = 'wc_product_sync_run';
 	const SYNC_LOCK_TRANSIENT  = 'wps_sync_running';
 	const SYNC_PROGRESS_TRANSIENT = 'wps_sync_progress';
+	const SYNC_LAST_RESULT     = 'wps_last_sync_result'; // Cumulative result of the last run (for UI feedback)
 
 	// Soft-delete
 	const META_SYNCED       = '_wps_synced';
@@ -148,6 +149,47 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 		return get_transient( self::SYNC_PROGRESS_TRANSIENT );
 	}
 
+	/** Seed a "starting" progress transient so the admin UI shows activity immediately,
+	 *  before the first page (and its X-WP-Total header) has been fetched. current_page=0
+	 *  marks this as the first batch of a fresh run (see $is_first_batch in run_sync_inner). */
+	private function seed_sync_progress() {
+		set_transient( self::SYNC_PROGRESS_TRANSIENT, array(
+			'current_page'       => 0,
+			'products_processed' => 0,
+			'total_products'     => 0,
+			'total_pages'        => 0,
+			'total_items'        => 0,
+			'per_page'           => $this->cfg_per_page(),
+			'started_at'         => time(),
+		), 3600 );
+	}
+
+	/** Reset the cumulative run-result tracker at the start of a manual/scheduled run. */
+	private function reset_run_result() {
+		update_option( self::SYNC_LAST_RESULT, array(
+			'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0,
+			'running' => true, 'started_at' => time(), 'finished_at' => 0,
+		), false );
+	}
+
+	/** Add a batch's stats to the cumulative run result; mark finished when complete.
+	 *  Called after each batch so the completion notice reflects the WHOLE sync, not
+	 *  just the final batch (each cron/resume invocation has its own local $stats). */
+	private function accumulate_run_result( array $stats, $complete ) {
+		$r = get_option( self::SYNC_LAST_RESULT, array() );
+		if ( ! is_array( $r ) ) {
+			$r = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0, 'started_at' => time() );
+		}
+		foreach ( array( 'created', 'updated', 'skipped', 'errors' ) as $k ) {
+			$r[ $k ] = (int) ( $r[ $k ] ?? 0 ) + (int) ( $stats[ $k ] ?? 0 );
+		}
+		$r['running'] = ! $complete;
+		if ( $complete ) {
+			$r['finished_at'] = time();
+		}
+		update_option( self::SYNC_LAST_RESULT, $r, false );
+	}
+
 	private function clear_sync_progress() {
 		delete_transient( self::SYNC_PROGRESS_TRANSIENT );
 	}
@@ -212,6 +254,9 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 				$sync_complete = true;
 			}
 		}
+
+		// Fold this batch into the cumulative result shown on the settings page.
+		$this->accumulate_run_result( $stats, $sync_complete );
 
 		if ( $sync_complete ) {
 			$this->log( 'info', 'Resumed batch completed successfully.' );
@@ -386,30 +431,39 @@ $defaults = array(
 				$eta_seconds  = '?';
 			}
 
+			// "Starting" state: seeded transient before the first page has been fetched.
+			$is_starting = ( 0 === (int) $page && 0 === (int) $processed );
+
 			echo '<div class="notice notice-info" style="padding:15px; margin-bottom:20px;">';
-			echo '<h3 style="margin:0 0 10px;">Synchronizacja w toku</h3>';
-			echo '<div style="background:#e5e5e5; border-radius:4px; height:24px; margin-bottom:8px; overflow:hidden;">';
-			echo '<div style="background:#2271b1; height:100%; width:' . esc_attr( $percent ) . '%; transition:width 0.3s;"></div>';
-			echo '</div>';
-			printf( '<p><strong>%d</strong> / <strong>%d</strong> produktów (%.1f%%) — strona %d/%s</p>',
-				$processed, $total, $percent, $page, $total_pages > 0 ? (int) $total_pages : esc_html( '?' ) );
-			echo '<p>Czas pracy: <strong>' . esc_html( $this->format_duration( $elapsed ) ) . '</strong>';
-			if ( is_numeric( $eta_seconds ) ) {
-				echo ', szacowany czas zakończenia: <strong>' . esc_html( $this->format_duration( $eta_seconds ) ) . '</strong>';
+			echo '<h3 style="margin:0 0 10px;">' . esc_html__( 'Synchronizacja w toku', 'wc-product-sync' ) . '</h3>';
+			if ( $is_starting ) {
+				echo '<p><span class="spinner is-active" style="float:none; margin:0 6px 0 0;"></span>'
+					. esc_html__( 'Uruchamianie — pobieranie danych ze źródła…', 'wc-product-sync' ) . '</p>';
+			} else {
+				echo '<div style="background:#e5e5e5; border-radius:4px; height:24px; margin-bottom:8px; overflow:hidden;">';
+				echo '<div style="background:#2271b1; height:100%; width:' . esc_attr( $percent ) . '%; transition:width 0.3s;"></div>';
+				echo '</div>';
+				printf( '<p><strong>%d</strong> / <strong>%d</strong> produktów (%.1f%%) — strona %d/%s</p>',
+					$processed, $total, $percent, $page, $total_pages > 0 ? (int) $total_pages : esc_html( '?' ) );
+				echo '<p>Czas pracy: <strong>' . esc_html( $this->format_duration( $elapsed ) ) . '</strong>';
+				if ( is_numeric( $eta_seconds ) ) {
+					echo ', szacowany czas zakończenia: <strong>' . esc_html( $this->format_duration( $eta_seconds ) ) . '</strong>';
+				}
+				echo '</p>';
 			}
-			echo '</p>';
 
 			// Auto-batch info — no manual continue needed anymore
 			echo '<p class="description" style="margin:8px 0 0;">';
-			echo esc_html__( 'Synchronizacja jest automatycznie kontynuowana batch po batchu przez WP-Cron. Strona może być zamknięta.', 'wc-product-sync' );
+			echo esc_html__( 'Synchronizacja jest automatycznie kontynuowana batch po batchu przez WP-Cron. Strona odświeża się sama; może być zamknięta.', 'wc-product-sync' );
 			echo '</p>';
 
 			printf( '<p><a href="%s" class="button button-link-danger" onclick="return confirm(\'Anulować synchronizację?\');">Anuluj</a>',
 				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_cancel' ), self::NONCE_ACTION . '_cancel' ) );
 			echo '</p>';
+			// Poll for progress while a sync is active. The script is only emitted while the
+			// progress transient exists, so it stops reloading once the sync finishes.
+			echo '<script>setTimeout(function(){ if(!document.hidden){ location.reload(); } }, 8000);</script>';
 			echo '</div>';
-		} else {
-			echo '<!-- no progress -->';
 		}
 
 		?>
@@ -428,11 +482,35 @@ $defaults = array(
 					);
 					?>
 				</p></div>
+			<?php elseif ( isset( $_GET['started'] ) ) : ?>
+				<div class="notice notice-info is-dismissible"><p>
+					<?php esc_html_e( 'Synchronizacja uruchomiona w tle. Postęp pojawi się poniżej i będzie się odświeżał automatycznie.', 'wc-product-sync' ); ?>
+				</p></div>
 			<?php elseif ( isset( $_GET['cancelled'] ) ) : ?>
 				<div class="notice notice-warning is-dismissible"><p>
 					<?php esc_html_e( 'Synchronizacja anulowana. Postęp nie został zapisany — produkty przetwarzane w tym batchu mogą wymagać ponownego przetworzenia.', 'wc-product-sync' ); ?>
 				</p></div>
 			<?php endif; ?>
+
+			<?php
+			// Completion summary for a background run: shown when nothing is active but a run
+			// finished recently. Auto-refresh lands the user here (no query args) once done.
+			if ( ! $progress ) {
+				$last = get_option( self::SYNC_LAST_RESULT, array() );
+				if ( is_array( $last ) && empty( $last['running'] ) && ! empty( $last['finished_at'] )
+					&& ( time() - (int) $last['finished_at'] ) < DAY_IN_SECONDS ) {
+					printf(
+						'<div class="notice notice-success is-dismissible"><p>%s</p></div>',
+						esc_html( sprintf(
+							/* translators: 1: created, 2: updated, 3: skipped, 4: errors, 5: when */
+							__( 'Synchronizacja zakończona (%5$s). Utworzono: %1$d, zaktualizowano: %2$d, pominięto: %3$d, błędy: %4$d.', 'wc-product-sync' ),
+							(int) $last['created'], (int) $last['updated'], (int) $last['skipped'], (int) $last['errors'],
+							human_time_diff( (int) $last['finished_at'] ) . ' temu'
+						) )
+					);
+				}
+			}
+			?>
 
 			<form method="post" action="options.php">
 				<?php settings_fields( 'wc_product_sync_group' ); ?>
@@ -567,18 +645,34 @@ $defaults = array(
 		}
 
 		$dry_run = isset( $_GET['mode'] ) && 'dry' === $_GET['mode'];
-		$stats   = $this->run_sync( $dry_run );
-		wp_safe_redirect( add_query_arg(
-			array(
-				'page'    => 'wc-product-sync',
-				'synced'  => 1,
-				'created' => $stats['created'],
-				'updated' => $stats['updated'],
-				'skipped' => $stats['skipped'],
-				'errors'  => $stats['errors'],
-			),
-			admin_url( 'admin.php' )
-		) );
+
+		// Dry run is quick and its whole point is to report the counts, so keep it synchronous.
+		if ( $dry_run ) {
+			$stats = $this->run_sync( true );
+			wp_safe_redirect( add_query_arg(
+				array(
+					'page'    => 'wc-product-sync',
+					'synced'  => 1,
+					'created' => $stats['created'],
+					'updated' => $stats['updated'],
+					'skipped' => $stats['skipped'],
+					'errors'  => $stats['errors'],
+				),
+				admin_url( 'admin.php' )
+			) );
+			exit;
+		}
+
+		// Real run: kick off in the background via WP-Cron so the browser isn't blocked for
+		// minutes. Seed a "starting" progress transient + reset the result tracker so the
+		// settings page shows activity immediately and auto-refreshes as batches complete.
+		if ( false === get_transient( self::SYNC_PROGRESS_TRANSIENT ) ) {
+			$this->reset_run_result();
+			$this->seed_sync_progress();
+			wp_schedule_single_event( time(), self::CRON_HOOK ); // Immediate one-off, separate from the daily event.
+			spawn_cron(); // Nudge WP-Cron to fire the event now instead of on the next visitor.
+		}
+		wp_safe_redirect( admin_url( 'admin.php?page=wc-product-sync&started=1' ) );
 		exit;
 	}
 
@@ -713,9 +807,9 @@ $defaults = array(
 			return $stats;
 		}
 
-		// Check if there's a pending batch resume
+		// Check if there's a pending batch resume (current_page>=1 = real continuation, not a seed)
 		$progress = $this->get_sync_progress();
-		if ( $progress && empty( $_GET['mode'] ) ) {
+		if ( $progress && ! empty( $progress['current_page'] ) && empty( $_GET['mode'] ) ) {
 			$this->log( 'info', sprintf( 'Wznowienie z %d/%d produktów, strona %d', $progress['products_processed'], $progress['total_products'], $progress['current_page'] ) );
 		}
 
@@ -728,6 +822,10 @@ $defaults = array(
 
 		try {
 			$result = $this->run_sync_inner( $dry_run, $stats, $progress, $still_batching );
+			if ( ! $dry_run ) {
+				// Accumulate this batch into the cumulative result; complete when not still batching.
+				$this->accumulate_run_result( $stats, ! $still_batching );
+			}
 			return $result;
 		} catch ( \Exception $e ) {
 			$this->log( 'error', 'Wyjątek w sync: ' . $e->getMessage() );
@@ -744,9 +842,13 @@ $defaults = array(
 	private function run_sync_inner( $dry_run, &$stats, $progress = null, &$still_batching = false ) {
 		$this->log( 'info', '=== Start synchronizacji' . ( $dry_run ? ' [DRY RUN]' : '' ) . ' ===' );
 
-		// Pełna synchronizacja – usuń stare lokalne produkty.
-		// SKIP if we're resuming from batch (progress exists) — full sync already done in initial run
-		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && empty( $progress );
+		// First batch of a fresh run? A seeded "starting" transient has current_page=0, so an
+		// absent progress OR current_page<1 both mean "first pass" — the only time force_full and
+		// (single-pass) soft-delete may run. A real resume has current_page>=1.
+		$is_first_batch = empty( $progress ) || (int) ( $progress['current_page'] ?? 0 ) < 1;
+
+		// Pełna synchronizacja – usuń stare lokalne produkty. Only on the first pass.
+		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && $is_first_batch;
 		if ( $force_full && ! $dry_run ) {
 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
 			global $wpdb;
@@ -945,9 +1047,11 @@ $defaults = array(
 
 		if ( function_exists( 'gc_collect_cycles' ) ) gc_collect_cycles();
 
-		// Soft-delete check (only if sync completed with full source view)
-		// NOTE: On resumed/batched syncs, $source_keys only covers the last batch — skip to avoid marking valid synced products as missing.
-		if ( empty( $progress ) && ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
+		// Soft-delete check (only if this run saw the FULL source in one pass).
+		// On resumed/batched syncs $source_keys only covers the last batch, so skip to avoid
+		// marking valid synced products as missing. Reaching here on the first batch means the
+		// whole catalog fit in this pass (no batch-limit early-return), so source_keys is complete.
+		if ( $is_first_batch && ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
 			$this->soft_delete_missing( array_unique( $source_keys ), $total_counted, $dry_run );
 		}
 
