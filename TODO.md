@@ -1,6 +1,19 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.9.3** — next tagged release = 1.0
+Current version: **0.9.4** — next tagged release = 1.0
+
+## v0.9.4 — hard-delete mode
+Owner request: opcja trwałego usuwania produktów, których nie ma w źródle (zamiast szkic+tag).
+- New `deletion_mode` = 'soft' (default, draft+tag) | 'hard' (permanent `$product->delete(true)`),
+  chosen via radio under "Tryb usuwania". Soft-delete checkbox relabeled to a mode-neutral master toggle.
+- Safety cap `hard_delete_max` (default 50, 0 = none): max permanent deletions per run, so a temporary
+  source glitch can't wipe the catalogue at once (excess handled in the next run).
+- Same guards as soft-delete: only `_wps_synced` products, skipped on fetch error / empty source, and
+  runs on the final batch with the accumulated whole-catalog key set.
+- Report: new `hard_deleted` bucket ("Usunięto trwale (brak w źródle)").
+- **Verified on docker:** sanitize (bogus→soft); 2 orphans + cap=1 → 1 deleted + report entry, 2nd run
+  removed the rest; real products (in source keys) untouched; UI renders radios + limit.
+
 
 ## v0.9.2 — fix: "Pełna synchronizacja" checkbox could not be disabled
 `force_full_sync` was written only inside `isset($input[...])`; an unchecked box is absent from POST

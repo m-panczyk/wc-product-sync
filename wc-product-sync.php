@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.3
+ * Version:           0.9.4
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -377,7 +377,9 @@ $defaults = array(
 		'sync_batch_limit'    => 200, // 0 = no limit (legacy), recommended: 200-500 products
 		'schedule_enabled'    => 0,
 		'soft_delete_enabled' => 0,
+		'deletion_mode'       => 'soft',  // 'soft' = szkic+tag; 'hard' = trwałe usunięcie
 		'soft_delete_limit'   => 50,
+		'hard_delete_max'     => 50,       // bezpiecznik: maks. trwałych usunięć na przebieg (0 = bez limitu)
 		'cron_hour'           => 3,
 		'cron_minute'         => 0,
 		'force_full_sync'     => 0,
@@ -492,6 +494,10 @@ $defaults = array(
 		$out['force_full_sync']     = empty( $input['force_full_sync'] ) ? 0 : 1;
 		if ( isset( $input['soft_delete_limit'] ) ) {
 			$out['soft_delete_limit']   = max( 0, (int) $input['soft_delete_limit'] );
+		}
+		$out['deletion_mode']   = ( isset( $input['deletion_mode'] ) && 'hard' === $input['deletion_mode'] ) ? 'hard' : 'soft';
+		if ( isset( $input['hard_delete_max'] ) ) {
+			$out['hard_delete_max'] = max( 0, (int) $input['hard_delete_max'] );
 		}
 		if ( isset( $input['cron_hour'] ) ) {
 			$out['cron_hour']         = max( 0, min( 23, (int) $input['cron_hour'] ) );
@@ -802,7 +808,7 @@ $defaults = array(
 						<th scope="row"><?php esc_html_e( 'Soft-delete', 'wc-product-sync' ); ?></th>
 						<td>
 							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[soft_delete_enabled]" value="1"
-								<?php checked( ! empty( $opts['soft_delete_enabled'] ) ); ?> /> <?php esc_html_e( 'Produkty usunięte ze źródła ustawiaj jako szkic i oznaczaj tagiem', 'wc-product-sync' ); ?></label>
+								<?php checked( ! empty( $opts['soft_delete_enabled'] ) ); ?> /> <?php esc_html_e( 'Obsługuj produkty usunięte ze źródła (sposób wybierasz w „Tryb usuwania" poniżej)', 'wc-product-sync' ); ?></label>
 							<p class="description">
 								<?php
 								printf(
@@ -815,11 +821,29 @@ $defaults = array(
 						</td>
 					</tr>
 					<tr>
-						<th scope="row"><label for="wps_sdl"><?php esc_html_e( 'Limit szkiców', 'wc-product-sync' ); ?></label></th>
+						<th scope="row"><?php esc_html_e( 'Tryb usuwania', 'wc-product-sync' ); ?></th>
+						<td>
+							<label style="display:block; margin-bottom:4px;"><input type="radio" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[deletion_mode]" value="soft"
+								<?php checked( ( $opts['deletion_mode'] ?? 'soft' ), 'soft' ); ?> /> <?php esc_html_e( 'Szkic + tag (bezpieczne, odwracalne)', 'wc-product-sync' ); ?></label>
+							<label style="display:block;"><input type="radio" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[deletion_mode]" value="hard"
+								<?php checked( ( $opts['deletion_mode'] ?? 'soft' ), 'hard' ); ?> /> <strong style="color:#b32d2e;"><?php esc_html_e( 'Trwałe usunięcie — NIEODWRACALNE', 'wc-product-sync' ); ?></strong></label>
+							<p class="description"><?php esc_html_e( 'Co zrobić z produktami, których nie ma już w źródle. „Trwałe usunięcie" kasuje je na stałe (z pominięciem kosza). Działa tylko na produkty synchronizowane przez ten plugin.', 'wc-product-sync' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="wps_sdl"><?php esc_html_e( 'Limit szkiców (tryb szkic)', 'wc-product-sync' ); ?></label></th>
 						<td>
 							<input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[soft_delete_limit]" id="wps_sdl" type="number" min="0" class="small-text"
 								value="<?php echo esc_attr( $opts['soft_delete_limit'] ); ?>" />
 							<p class="description"><?php esc_html_e( 'Ile szkiców soft-delete zachować. Najstarsze ponad limit są trwale usuwane. 0 = bez limitu.', 'wc-product-sync' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="wps_hdm"><?php esc_html_e( 'Limit trwałych usunięć / przebieg', 'wc-product-sync' ); ?></label></th>
+						<td>
+							<input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[hard_delete_max]" id="wps_hdm" type="number" min="0" class="small-text"
+								value="<?php echo esc_attr( $opts['hard_delete_max'] ); ?>" />
+							<p class="description"><?php esc_html_e( 'Bezpiecznik trybu „Trwałe usunięcie": maks. produktów usuwanych w jednym przebiegu. Chroni przed skasowaniem całego katalogu przy chwilowym błędzie źródła. 0 = bez limitu.', 'wc-product-sync' ); ?></p>
 						</td>
 					</tr>
 				</table>
@@ -856,6 +880,7 @@ $defaults = array(
 			'updated'      => __( 'Zaktualizowano', 'wc-product-sync' ),
 			'skipped'      => __( 'Pominięto', 'wc-product-sync' ),
 			'soft_deleted' => __( 'Oznaczono jako usunięte (draft)', 'wc-product-sync' ),
+			'hard_deleted' => __( 'Usunięto trwale (brak w źródle)', 'wc-product-sync' ),
 			'warnings'     => __( 'Ostrzeżenia', 'wc-product-sync' ),
 			'errors'       => __( 'Błędy', 'wc-product-sync' ),
 		);
@@ -2185,8 +2210,46 @@ $defaults = array(
 			$page++;
 		} while ( 100 === $count );
 
+		$mode = ( 'hard' === ( $this->get_options()['deletion_mode'] ?? 'soft' ) ) ? 'hard' : 'soft';
+
 		if ( ! $candidates ) {
-			$this->enforce_soft_delete_limit( $dry_run );
+			if ( 'soft' === $mode ) {
+				$this->enforce_soft_delete_limit( $dry_run );
+			}
+			return;
+		}
+
+		// HARD DELETE mode: permanently remove products that no longer exist in the source.
+		// Irreversible — protected by the same guards (no fetch error, source_count>=1) plus a
+		// per-run safety cap so a temporary source glitch can't wipe the whole catalogue at once.
+		if ( 'hard' === $mode ) {
+			$cap = (int) $this->get_options()['hard_delete_max'];
+			if ( $cap > 0 && count( $candidates ) > $cap ) {
+				$this->log( 'warning', sprintf( 'Hard-delete: %d produktów do usunięcia przekracza limit bezpieczeństwa %d — usuwam %d w tym przebiegu.', count( $candidates ), $cap, $cap ) );
+				$candidates = array_slice( $candidates, 0, $cap );
+			}
+			$this->log( 'info', sprintf( 'Hard-delete: trwale usuwam %d produktów, których nie ma w źródle.', count( $candidates ) ) );
+			foreach ( $candidates as $pid ) {
+				$product = wc_get_product( $pid );
+				$name    = $product ? $product->get_name() : '';
+				$sku     = $product ? $product->get_sku() : '';
+				$this->report_add( 'hard_deleted', array(
+					'name'   => $name,
+					'sku'    => $sku,
+					'type'   => $product ? $product->get_type() : '',
+					'reason' => 'brak w źródle — usunięto trwale' . ( $dry_run ? ' [DRY]' : '' ),
+				) );
+				if ( $dry_run ) {
+					$this->log( 'info', sprintf( '[DRY] HARD-DELETE: %s (ID=%d, SKU=%s)', $name, $pid, $sku ) );
+					continue;
+				}
+				if ( $product ) {
+					$product->delete( true );
+				} else {
+					wp_delete_post( $pid, true );
+				}
+				$this->log( 'info', sprintf( 'HARD-DELETE (brak w źródle): %s (ID=%d, SKU=%s)', $name, $pid, $sku ) );
+			}
 			return;
 		}
 
