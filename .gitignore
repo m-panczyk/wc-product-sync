@@ -2,3 +2,5 @@
 *.zip
 vendor/
 composer.lock
+tests/perf.env
+metrics/*.csv
