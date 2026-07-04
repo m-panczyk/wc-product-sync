@@ -13,6 +13,72 @@ General rules for the agent:
 
 ---
 
+## v0.8.2 LIVE REVIEW (2026-07-04) — findings from testing against real WP+WC
+
+Tested on the docker test bed (`wp-docker-test`: WP + WooCommerce 10.9.1, source = live store,
+500 products / 5 pages, `per_page=100`, `batch_limit=50`). PHP 8.3 lint clean.
+
+### L1. CRITICAL — "Dry run" armed a REAL, writing sync — **FIXED in v0.8.2**
+**Where:** `run_sync_inner()` batch-limit branch.
+**Problem:** the batch-limit check saved a progress transient and scheduled `wps_sync_resume`
+regardless of `$dry_run`. `run_resume_batch()` calls `run_sync_inner(false, …)` (non-dry), so a
+dry run against any catalog larger than `batch_limit` queued a real sync that fired on the next
+WP-cron tick and started creating/updating/soft-deleting products. Reproduced live: a dry run
+left a progress transient (`products_processed:100`) and a `wps_sync_resume` event +9s.
+**Fix:** wrapped progress-save + batch-limit scheduling in `if ( ! $dry_run )`. Dry runs now
+process every page in one pass and persist nothing.
+**Verified:** dry run → created=422/updated=47/skipped=23, NO transient, NO scheduled resume, 47
+products unchanged.
+
+### L2. MAJOR — grouped products dropped at the batch boundary — **FIXED in v0.8.2**
+**Where:** grouped-drain loop after the page loop.
+**Problem:** `$break_from_limit` was set `true` inside the page-loop limit branch, then
+unconditionally reset to `false` on the line immediately after the loop, destroying the flag. The
+grouped-drain limit check therefore always ran, so grouped products buffered on the page where the
+limit hit were skipped — and resume restarts at the NEXT page, so they were never processed.
+Also `$batch_limit_hit_at_page` was set but never read.
+**Fix:** removed `$break_from_limit` / `$batch_limit_hit_at_page`; the grouped buffer is now always
+fully drained (its items were already counted and belong to already-fetched pages). Added a clean
+`$hit_batch_limit` flag handled once after the loop. NOTE: cross-batch grouped *child* resolution
+(children on later, not-yet-synced pages) is still the open part of B3 below.
+
+### L3. MAJOR — resume completion had an always-false sub-condition — **FIXED in v0.8.2**
+**Where:** `run_resume_batch()` completion check.
+**Problem:** `$processed !== $new['products_processed'] && $new['products_processed'] === $progress['products_processed']`
+is a contradiction (`$processed` == `$progress['products_processed']`), so the stall-detection
+branch never fired — only `current_page >= total_pages` did.
+**Fix:** rewrote as: complete iff transient cleared, OR (no fetch error AND (past last page OR no
+forward progress)). The fetch-error guard prevents a transient network error from being mistaken
+for a stall and aborting the whole sync.
+
+### L4. MINOR — elapsed time / ETA reset every page — **FIXED in v0.8.2**
+**Where:** `save_sync_progress()`.
+**Problem:** `'started_at' => time()` was written on every page save, so the admin UI's "Czas pracy"
+and ETA measured time-since-last-page, not since sync start.
+**Fix:** preserve the existing transient's `started_at` across saves.
+
+### L5. HOUSEKEEPING — version header reconciled — **DONE in v0.8.2**
+Commit `9930a67` claimed a bump to 0.8.2 but the file header still read `0.8.1`. Header now `0.8.2`.
+
+### L6. MINOR — B4 UI polish — **FIXED in v0.8.2**
+- Progress now shows `strona X/Y` (real `total_pages` from the transient) instead of `strona X/?`.
+- Capture the exact `X-WP-Total` header → store `total_items`; progress % uses it so the bar reaches
+  100% instead of overcounting the last partial page via `total_pages × per_page`.
+- Removed the dead `foreach_product()` method (was unused since `run_sync_inner()` got its own loop).
+**Verified:** transient shows `total_items:492` (exact) and the UI renders `100 / 492 (20.3%) — strona 1/5`.
+
+### Live end-to-end verification (real WP+WC, source = 500 products / 5 pages)
+- Dry run: full catalog simulated, NO progress transient, NO scheduled resume, 0 DB writes (L1).
+- Real batch 1 → 2: `current_page` 1→2, `products_processed` 100→200, `started_at` **unchanged**
+  across the boundary (L4), resume rescheduled each time (L2/L3 — no restart, no early stop).
+- Completion: advancing to the last page clears the progress transient and schedules NO new resume
+  (no infinite loop); firing a resume with no progress is a harmless no-op (L3).
+- Idempotency: a second consecutive run reports `created=0, updated=92` (unchanged source).
+- NOTE: the source pages 1–2 contained no `grouped` products, so L2's grouped-drain fix is verified
+  by code inspection (buffer is always drained) but was not empirically triggered.
+
+---
+
 ## v0.8.0 BATCHING REVIEW (uncommitted changes) — highest priority
 
 Findings from review of the auto-batching / WP-Cron resume work in `wc-product-sync.php`.
@@ -31,6 +97,7 @@ Do B1 first: one-line fix, largest impact, independent.
 **Note from Codex round 2:** grouped products increment `products_processed` count twice (once in main loop when added to buffer, once when processed in grouped loop), inflating progress numbers. Soft-delete uses `$source_keys` rebuilt per PHP process, so on final resume batch it only has keys from that single batch — risk of incorrectly soft-deleting products from earlier batches.
 **Fix (needs design decision — flag to owner):** accumulate `$source_keys` + grouped/child-SKU maps in the persisted progress transient and run grouped processing + soft-delete only on the final batch using the full set; OR run them in a dedicated final cron step after all pages; OR (minimum) document in the settings UI that grouped products and soft-delete are unsupported while batching is enabled, and skip them without corrupting data.
 **Acceptance:** with batching enabled, grouped products sync correctly and soft-delete either runs on the complete set or is clearly documented as disabled.
+**Update (v0.8.2, see L2):** the grouped *drop* bug is fixed — buffered groupeds are no longer discarded at the batch boundary. STILL OPEN: grouped children on later, not-yet-synced pages won't resolve mid-batch, and soft-delete is still skipped on resumed batches (`empty( $progress )` guard). Persist `$source_keys` + child-SKU map in the progress transient and run grouped/soft-delete on the final batch, OR document as unsupported while batching.
 
 ### B4. MINOR — cleanups (PARTIALLY DONE)
 - **DONE:** No lock during resume → FIXED in v0.8.2: `run_resume_batch()` sets sync lock around `run_sync_inner()`, bails if manual sync active.

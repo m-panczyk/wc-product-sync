@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.8.1
+ * Version:           0.8.2
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -49,6 +49,8 @@ final class WC_Product_Sync {
 	private $source_id_to_sku = array();
 	/** Ostatnie total_pages pobrane z nagłówka X-WP-TotalPages */
 	private $last_total_pages = 0;
+	/** Ostatnia dokładna liczba produktów z nagłówka X-WP-Total */
+	private $last_total_items = 0;
 	/** Czy pobieranie źródła napotkało błąd (blokada soft-delete) */
 	private $fetch_had_error = false;
 	/** Czy pobieranie wariacji napotkało błąd (blokada usunięć) */
@@ -127,13 +129,18 @@ final class WC_Product_Sync {
 	 * ================================================================== */
 
 private function save_sync_progress( $current_page, $products_processed, $total_products ) {
+		// Preserve the original start time across page/batch saves so the admin UI's
+		// elapsed-time and ETA reflect the whole sync, not just since the last page.
+		$existing   = get_transient( self::SYNC_PROGRESS_TRANSIENT );
+		$started_at = ( is_array( $existing ) && ! empty( $existing['started_at'] ) ) ? (int) $existing['started_at'] : time();
 		set_transient( self::SYNC_PROGRESS_TRANSIENT, array(
 			'current_page'     => $current_page,
 			'products_processed' => $products_processed,
 			'total_products'   => $total_products,
 			'total_pages'      => $this->last_total_pages, // Store for resume calculations
+			'total_items'      => $this->last_total_items, // Exact count for accurate progress %
 			'per_page'         => $this->cfg_per_page(),    // Store per_page for resume
-			'started_at'       => time(),
+			'started_at'       => $started_at,
 		), 3600 ); // Persist for 1 hour (enough for all batches to finish)
 	}
 
@@ -187,20 +194,23 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			delete_transient( self::SYNC_LOCK_TRANSIENT );
 		}
 
-		// Check if still in progress after resume
-		$new_progress = $this->get_sync_progress();
-		$sync_complete = false;
+		// Completion check. run_sync_inner() clears the progress transient when the sync is
+		// truly done, so an empty transient means complete. If it kept the transient we treat
+		// the batch as complete only when there was NO fetch error AND either we are past the
+		// last page or this resume made no forward progress (a stall — e.g. exhausted pages).
+		// The fetch-error guard is essential: without it a transient network error would be
+		// mistaken for a stall and abort the whole sync.
+		$new_progress  = $this->get_sync_progress();
+		$sync_complete = empty( $new_progress );
 
-		if ( ! $new_progress ) {
-			// run_sync_inner() cleared progress — sync completed fully
-			$sync_complete = true;
-		} else if ( $processed === $new_progress['products_processed'] && $new_progress['current_page'] < $new_progress['total_pages'] ) {
-			// No new work done during this resume and we expected more pages.
-			// This happens when run_sync_inner() hit an empty page early.
-			// All remaining content is exhausted — clear stale progress (Codex #1 fix: prevents infinite resume loop).
-			$this->clear_sync_progress();
-			$sync_complete = true;
-			$this->log( 'info', sprintf( 'Resume completed: no more pages to fetch from page %d (expected %d total).', $current_page + 1, $new_progress['total_pages'] ) );
+		if ( ! $sync_complete && ! $this->fetch_had_error ) {
+			$made_progress  = $new_progress['products_processed'] > $processed;
+			$past_last_page = ! empty( $new_progress['total_pages'] )
+				&& $new_progress['current_page'] >= $new_progress['total_pages'];
+			if ( $past_last_page || ! $made_progress ) {
+				$this->clear_sync_progress();
+				$sync_complete = true;
+			}
 		}
 
 		if ( $sync_complete ) {
@@ -361,11 +371,11 @@ $defaults = array(
 			$start_time = $progress['started_at'];
 			$elapsed    = time() - $start_time;
 			$processed  = $progress['products_processed'];
-			$total      = max( $progress['total_products'], $processed );
-			$page       = $progress['current_page'];
-			$per_page   = (int) $this->cfg_per_page();
-			$pages_done = min( $page, 999999 );
-			$percent    = $total > 0 ? round( $processed / max( $total, 1 ) * 100, 1 ) : 0;
+			$total       = max( $progress['total_products'], $processed );
+			$page        = $progress['current_page'];
+			$per_page    = (int) $this->cfg_per_page();
+			$total_pages = isset( $progress['total_pages'] ) ? (int) $progress['total_pages'] : 0;
+			$percent     = $total > 0 ? round( $processed / max( $total, 1 ) * 100, 1 ) : 0;
 
 			// ETA: simple linear extrapolation
 			if ( $elapsed > 5 ) {
@@ -382,7 +392,7 @@ $defaults = array(
 			echo '<div style="background:#2271b1; height:100%; width:' . esc_attr( $percent ) . '%; transition:width 0.3s;"></div>';
 			echo '</div>';
 			printf( '<p><strong>%d</strong> / <strong>%d</strong> produktów (%.1f%%) — strona %d/%s</p>',
-				$processed, $total, $percent, $page, esc_html( '?' ) );
+				$processed, $total, $percent, $page, $total_pages > 0 ? (int) $total_pages : esc_html( '?' ) );
 			echo '<p>Czas pracy: <strong>' . esc_html( $this->format_duration( $elapsed ) ) . '</strong>';
 			if ( is_numeric( $eta_seconds ) ) {
 				echo ', szacowany czas zakończenia: <strong>' . esc_html( $this->format_duration( $eta_seconds ) ) . '</strong>';
@@ -643,40 +653,6 @@ $defaults = array(
 		) );
 	}
 
-	private function foreach_product( callable $callback ) {
-		$page   = 1;
-		$per_page = $this->cfg_per_page();
-		$total_counted = 0;
-
-		do {
-			$batch = $this->fetch_product_page( $page );
-			if ( is_wp_error( $batch ) ) {
-				$this->fetch_had_error = true;
-				$this->log( 'error', 'Pobieranie strony ' . $page . ': ' . $batch->get_error_message() );
-				break;
-			}
-			$count = count( $batch );
-			if ( 0 === $count ) {
-				break;
-			}
-			$total_counted += $count;
-			$this->log( 'info', sprintf( 'Pobrano stronę %d (%d produktów)', $page, $count ) );
-
-			foreach ( $batch as $product ) {
-				$callback( $product, $this );
-			}
-
-			unset( $batch );
-			if ( function_exists( 'gc_collect_cycles' ) ) {
-				gc_collect_cycles();
-			}
-
-			$page++;
-		} while ( $count === $per_page );
-
-		return $total_counted;
-	}
-
 	private function fetch_source_attributes() {
 		$out  = array();
 		$list = $this->api_get( '/wp-json/wc/v3/products/attributes', array( 'per_page' => 100 ) );
@@ -798,6 +774,8 @@ $defaults = array(
 		$batch_limit = (int) $this->get_options()['sync_batch_limit']; // 0 = unlimited
 		$page = $progress ? $progress['current_page'] + 1 : 1; // Resume from NEXT page (current already processed)
 		$products_processed = $progress ? $progress['products_processed'] : 0;
+		$pages_fetched      = 0;      // Track successful pages in this run
+		$fetch_had_error    = false;  // Track if we hit a fetch error during THIS run
 
 		// For batched syncs, track how many we process in THIS batch vs overall
 		$batch_start_count = $products_processed;
@@ -808,29 +786,38 @@ $defaults = array(
 			$total_pages   = absint( $progress['total_pages'] );
 			$this->last_total_pages = $total_pages; // keep alive across resume batches (B1 fix)
 		}
+		if ( $progress && ! empty( $progress['total_items'] ) ) {
+			$this->last_total_items = absint( $progress['total_items'] ); // keep exact count across batches
+		}
 
 		$this->source_attributes = $this->fetch_source_attributes();
 
-		$total_counted = 0;
-		$source_keys   = array();
-		$grouped_buf   = array();
+		$total_counted    = 0;
+		$source_keys      = array();
+		$grouped_buf      = array();
+		$seen_source_ids  = array(); // Dedup: track processed product IDs (Codex R3 fix)
+		$hit_batch_limit  = false;   // Set true when the page loop stops at the batch limit
 
 		do {
 			$batch = $this->fetch_product_page( $page );
 			if ( is_wp_error( $batch ) ) {
-				$this->fetch_had_error = true;
+				$this->fetch_had_error  = true;
+				$fetch_had_error         = true;
+				$count                   = 0; // Prevent undefined $count warning after break
 				$this->log( 'error', 'Pobieranie strony ' . $page . ': ' . $batch->get_error_message() );
 				break;
 			}
 
 			$count = count( $batch );
 			if ( 0 === $count ) {
-				// No more products on this page — sync is complete!
-				// Don't save progress: no work done, and run_resume_batch() handles completion detection.
-				return $stats; // Caller handles clearing/cleanup
+				// No more products on this page. This can happen when total_products is an exact multiple of per_page.
+				// We need to process any remaining buffered grouped products and complete sync before clearing progress.
+				break; // Exit do-while, fall through to grouped processing + soft-delete below
 			}
 
-			// Capture total pages from WC REST API header on first page
+			$pages_fetched++;
+
+			// Capture total pages + exact item count from WC REST API headers on first page
 			if ( 1 === $page ) {
 				if ( isset( $this->last_api_headers['X-WP-TotalPages'] ) ) {
 					$total_pages = absint( $this->last_api_headers['X-WP-TotalPages'] );
@@ -838,6 +825,12 @@ $defaults = array(
 				} elseif ( isset( $this->last_api_headers['x-wp-totalpages'] ) ) {
 					$total_pages = absint( $this->last_api_headers['x-wp-totalpages'] );
 					$this->last_total_pages = $total_pages;
+				}
+				// X-WP-Total = exact product count → accurate progress % (bar reaches 100%).
+				if ( isset( $this->last_api_headers['X-WP-Total'] ) ) {
+					$this->last_total_items = absint( $this->last_api_headers['X-WP-Total'] );
+				} elseif ( isset( $this->last_api_headers['x-wp-total'] ) ) {
+					$this->last_total_items = absint( $this->last_api_headers['x-wp-total'] );
 				}
 			} else if ( ! $total_pages && $this->last_total_pages > 0 ) {
 				// Subsequent pages use the total captured from first page
@@ -848,7 +841,12 @@ $defaults = array(
 			$this->log( 'info', sprintf( 'Strona %d/%d (%d produktów)', $page, $total_pages ?: '?', $count ) );
 
 			foreach ( $batch as $p ) {
-				$products_processed++;
+				// Dedup by source ID or parent_id for variations/grouped children (Codex R3 fix)
+				$dedup_key = ! empty( $p['parent_id'] ) ? (int) $p['parent_id'] : (int) ( $p['id'] ?? 0 );
+				if ( $dedup_key && empty( $seen_source_ids[ $dedup_key ] ) ) {
+					$seen_source_ids[ $dedup_key ] = true;
+					$products_processed++;
+				}
 
 				// Track source keys
 				$sku = isset( $p['sku'] ) ? trim( $p['sku'] ) : '';
@@ -872,54 +870,83 @@ $defaults = array(
 
 			unset( $batch );
 
-			// Progress saved only at page boundaries (Codex #2 fix: no mid-page saves)
-			$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
-			$this->save_sync_progress( $page, $products_processed, $true_total );
+			// Progress persistence + batching apply to REAL runs only. A dry run must never
+			// save progress or schedule a resume, otherwise "Symulacja (dry run)" would arm a
+			// real, writing sync via the resume hook. Dry runs process every page in one pass.
+			if ( ! $dry_run ) {
+				// Progress saved only at page boundaries (Codex #2 fix: no mid-page saves).
+				// Prefer the exact X-WP-Total count so the progress bar can reach 100%;
+				// fall back to total_pages × per_page (overcounts the last partial page).
+				$true_total = $this->last_total_items > 0
+					? $this->last_total_items
+					: ( $total_pages > 0 ? $total_pages * $per_page : $total_counted );
+				$this->save_sync_progress( $page, $products_processed, $true_total );
 
-			// Batch limit check AFTER completing the page (Codex #3 fix: process-before-check)
-			if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
-				$still_batching   = true;
-				$this->log( 'info', sprintf( 'Limit batchu (%d produktów) osiągnięty po stronie %d — harmonogramowanie wznowienia.', $batch_limit, $page ) );
+				// Batch limit check AFTER completing the page (Codex #3 fix: process-before-check)
+				// Note: we break (not return) to ensure grouped_buf for THIS page is still drained
+				if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
+					$still_batching = true;
+					$this->log( 'info', sprintf( 'Limit batchu (%d produktów) osiągnięty po stronie %d — harmonogramowanie wznowienia.', $batch_limit, $page ) );
 
-				if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
-					wp_clear_scheduled_hook( self::RESUME_HOOK );
+					if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
+						wp_clear_scheduled_hook( self::RESUME_HOOK );
+					}
+					wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // 30s buffer
+					$hit_batch_limit = true; // Handled after the loop: keep progress, resume scheduled
+					break; // Stop fetching pages; grouped drain below still runs for THIS page
 				}
-				wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // 30s buffer
-				return $stats;
 			}
 
-			$page++;
+		$page++;
 		} while ( $count === $per_page );
 
-		// Process grouped products
+		// Drain grouped products buffered during this run. They were already counted in the
+		// page loop (no increment here) and belong to pages we already fetched, so we always
+		// process the full buffer. Dropping them at the batch limit would lose data: resume
+		// restarts at the NEXT page and never re-fetches these groupeds. Grouped children are
+		// pre-counted too, so draining cannot push us over the limit.
 		foreach ( $grouped_buf as $p ) {
-			$products_processed++;
-			if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
-				$still_batching = true;
-				$this->log( 'info', sprintf( 'Limit batchu (%d) osiągnięty przy grouped: %s.', $batch_limit, $p['name'] ?? '?' ) );
-
-				if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
-					wp_clear_scheduled_hook( self::RESUME_HOOK );
-				}
-				wp_schedule_single_event( time() + 30, self::RESUME_HOOK );
-				return $stats;
-			}
 			$this->process_single_product( $p, $dry_run, $stats );
 		}
 
-		// If we completed all pages, clear progress (full sync done)
-		if ( $count < $per_page && 0 !== $total_pages ) {
+		// Stopped at the batch limit — progress preserved, resume already scheduled.
+		if ( $hit_batch_limit ) {
+			$this->log( 'info', 'Limit batchu osiągnięty — pozostawiam postęp do kontynuacji.' );
+			return $stats;
+		}
+
+// If we completed all pages, clear progress (full sync done)
+		if ( $fetch_had_error && 0 !== $total_pages ) {
+			// Fetch error during sync — preserve progress to resume from where we left off.
+			$still_batching = true; // Prevent caller's finally from clearing progress (Codex R5 fix #2)
+			$this->log( 'warning', sprintf( 'Błąd pobierania na stronie %d — zachowuję postęp, synchronizacja wymaga wznowienia.', $page ) );
+			return $stats;
+		} else if ( $count < $per_page && 0 !== $total_pages ) {
 			$this->log( 'info', sprintf( 'Wszystkie %d/%d strony przetworzone.', $page - 1, $total_pages ) );
 			// Clear progress — sync is truly done
+		} else if ( $fetch_had_error && $pages_fetched === 0 ) {
+			// Fetch error on first page attempt with no prior progress — clear stale progress to avoid infinite resume loop
+			$this->log( 'warning', 'Błąd pobierania na pierwszej stronie wznowienia bez wcześniejszego postępu — usuwam stary postęp.' );
+			$still_batching = false;
+		} else if ( $count < $per_page && 0 === $total_pages ) {
+			// total_pages not reported by API but we got a partial page — sync is complete even without X-WP-TotalPages
+			if ( $pages_fetched >= 1 ) {
+				$this->log( 'info', 'Brak nagłówka X-WP-TotalPages z API, ale otrzymano niepełną stronę — synchronizacja zakończona.' );
+				// Fall through to soft-delete + clear progress
+			} else {
+				// No pages fetched and no totalPages — likely empty source or API issue. Don't clear progress for resumed batch.
+				return $stats;
+			}
 		} else {
-			// Still more pages to fetch but we hit batch limit — DON'T clear progress yet
-			$this->log( 'info', sprintf( 'Limit batchu osiągnięty — pozostawiam progress do wznowienia.' ) );
+			// Still more pages to fetch but we hit batch limit or resumed with prior progress — DON'T clear progress yet
+			$this->log( 'info', sprintf( 'Limit batchu osiągnięty lub wznowienie — pozostawiam postęp do kontynuacji.' ) );
 			return $stats; // Exit early, don't reach the clear at bottom
 		}
 
 		if ( function_exists( 'gc_collect_cycles' ) ) gc_collect_cycles();
 
-		// Soft-delete check (only if sync completed)
+		// Soft-delete check (only if sync completed with full source view)
+		// NOTE: On resumed/batched syncs, $source_keys only covers the last batch — skip to avoid marking valid synced products as missing.
 		if ( empty( $progress ) && ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
 			$this->soft_delete_missing( array_unique( $source_keys ), $total_counted, $dry_run );
 		}
