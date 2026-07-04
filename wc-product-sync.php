@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.1
+ * Version:           0.9.2
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -463,8 +463,11 @@ $defaults = array(
 		if ( isset( $input['sync_batch_limit'] ) ) {
 			$out['sync_batch_limit'] = max( 0, (int) $input['sync_batch_limit'] ); // 0 = unlimited (legacy)
 		}
+		// Checkboxes: an unchecked box is absent from $input, so these must be set
+		// unconditionally (no isset guard) — otherwise they can never be turned OFF.
 		$out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
 		$out['soft_delete_enabled'] = empty( $input['soft_delete_enabled'] ) ? 0 : 1;
+		$out['force_full_sync']     = empty( $input['force_full_sync'] ) ? 0 : 1;
 		if ( isset( $input['soft_delete_limit'] ) ) {
 			$out['soft_delete_limit']   = max( 0, (int) $input['soft_delete_limit'] );
 		}
@@ -473,9 +476,6 @@ $defaults = array(
 		}
 		if ( isset( $input['cron_minute'] ) ) {
 			$out['cron_minute']       = max( 0, min( 59, (int) $input['cron_minute'] ) );
-		}
-		if ( isset( $input['force_full_sync'] ) ) {
-			$out['force_full_sync']   = empty( $input['force_full_sync'] ) ? 0 : 1;
 		}
 		add_action( 'shutdown', array( $this, 'sync_cron_schedule' ) );
 		return $out;
