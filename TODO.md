@@ -1,6 +1,31 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.9.1** (per-run report: what/how + skipped/why) — next tagged release = 1.0
+Current version: **0.9.3** — next tagged release = 1.0
+
+## v0.9.2 — fix: "Pełna synchronizacja" checkbox could not be disabled
+`force_full_sync` was written only inside `isset($input[...])`; an unchecked box is absent from POST
+so it kept the old value. Now set unconditionally like other checkboxes. (schedule/soft_delete were OK.)
+
+## v0.9.3 — "Co synchronizować" selectors (Part A of the owner request)
+New settings (defaults preserve legacy behaviour = everything, publish only):
+- **`sync_types`** (simple/variable/grouped) — enforced in `dispatch_upsert` (disabled → skipped with
+  reason "typ '…' wyłączony w ustawieniach").
+- **`sync_statuses`** (publish/draft/pending/private) — `should_sync_status()` now reads the option.
+- **`sync_fields`** (description/price/stock/images/categories/attributes/dimensions) — gated at every
+  write point (`apply_common_fields`, `apply_stock`, `apply_physical`, simple/variable price+attrs,
+  variation price+image, product+grouped images). A disabled field is never written on create OR
+  update, so local edits are preserved. Name/status/SKU always synced.
+- UI: three checkbox groups; `sanitize_choice_set()` keeps only known values.
+- **Verified on docker:** grouped→skipped w/reason; status reads option; with fields=stock only, a
+  product's description ("SENTINEL") and price (777.77) were preserved on a real update, then updated
+  once re-enabled.
+
+### Part B (TODO — next) — category filter
+`sync_category_ids`: sync only products in selected SOURCE categories. Needs: fetch source category
+list for the settings UI (checkboxes + refresh), skip products outside the set (with report reason),
+and **scope soft-delete to those categories** (else soft-delete would draft everything outside the
+filter). Do this as its own change.
+
 
 ## v0.9.1 — per-run report (2026-07-04)
 Owner request: "after update, report what was updated and how, what was skipped and why."

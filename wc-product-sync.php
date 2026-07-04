@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.2
+ * Version:           0.9.3
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -381,8 +381,19 @@ $defaults = array(
 		'cron_hour'           => 3,
 		'cron_minute'         => 0,
 		'force_full_sync'     => 0,
+		// What to sync (defaults preserve legacy behaviour: everything, publish only).
+		'sync_types'          => array( 'simple', 'variable', 'grouped' ),
+		'sync_statuses'       => array( 'publish' ),
+		'sync_fields'         => array( 'description', 'price', 'stock', 'images', 'categories', 'attributes', 'dimensions' ),
 	);
-		return wp_parse_args( get_option( self::OPTION_KEY, array() ), $defaults );
+		$opts = wp_parse_args( get_option( self::OPTION_KEY, array() ), $defaults );
+		// Ensure the array-typed options are always arrays (older saved rows may lack them).
+		foreach ( array( 'sync_types', 'sync_statuses', 'sync_fields' ) as $ak ) {
+			if ( ! is_array( $opts[ $ak ] ) ) {
+				$opts[ $ak ] = $defaults[ $ak ];
+			}
+		}
+		return $opts;
 	}
 
 	private function cfg_source_url() {
@@ -412,6 +423,17 @@ $defaults = array(
 
 	private function is_configured() {
 		return $this->cfg_source_url() && $this->cfg_ck() && $this->cfg_cs();
+	}
+
+	/** Is this product type enabled for sync? (types to sync — settings) */
+	private function type_enabled( $type ) {
+		return in_array( $type, (array) $this->get_options()['sync_types'], true );
+	}
+
+	/** Should this data field be written? (fields to sync — settings). A disabled field is
+	 *  never touched on create or update, so local edits to it are preserved. */
+	private function field_on( $field ) {
+		return in_array( $field, (array) $this->get_options()['sync_fields'], true );
 	}
 
 	/** N1: HTTP source on a public host leaks the Basic-auth API keys in cleartext.
@@ -477,7 +499,23 @@ $defaults = array(
 		if ( isset( $input['cron_minute'] ) ) {
 			$out['cron_minute']       = max( 0, min( 59, (int) $input['cron_minute'] ) );
 		}
+		// "What to sync" multi-selects (checkbox groups): keep only known values, in order.
+		$out['sync_types']    = $this->sanitize_choice_set( $input['sync_types'] ?? array(), array( 'simple', 'variable', 'grouped' ) );
+		$out['sync_statuses'] = $this->sanitize_choice_set( $input['sync_statuses'] ?? array(), array( 'publish', 'draft', 'pending', 'private' ) );
+		$out['sync_fields']   = $this->sanitize_choice_set( $input['sync_fields'] ?? array(), array( 'description', 'price', 'stock', 'images', 'categories', 'attributes', 'dimensions' ) );
 		add_action( 'shutdown', array( $this, 'sync_cron_schedule' ) );
+		return $out;
+	}
+
+	/** Keep only allowed values from a submitted checkbox group (preserves canonical order). */
+	private function sanitize_choice_set( $input, array $allowed ) {
+		$input = is_array( $input ) ? $input : array();
+		$out   = array();
+		foreach ( $allowed as $v ) {
+			if ( in_array( $v, $input, true ) ) {
+				$out[] = $v;
+			}
+		}
 		return $out;
 	}
 
@@ -677,6 +715,52 @@ $defaults = array(
 						value="<?php echo esc_attr( $opts['sync_batch_limit'] ); ?>" />
 <p class="description"><?php esc_html_e( 'Liczba produktów przetwarzana w jednym batchu przez WP-Cron. Sync kontynuuje automatycznie po zakończeniu każdego batcha (co 30s). 0 = bez limitu.', 'wc-product-sync' ); ?></p></td>
 				</tr>
+				<?php
+				$wps_checkbox_group = function ( $field, $choices, $selected ) {
+					foreach ( $choices as $val => $lbl ) {
+						printf(
+							'<label style="margin:0 14px 4px 0; display:inline-block;"><input type="checkbox" name="%1$s[%2$s][]" value="%3$s" %4$s /> %5$s</label>',
+							esc_attr( self::OPTION_KEY ), esc_attr( $field ), esc_attr( $val ),
+							checked( in_array( $val, (array) $selected, true ), true, false ), esc_html( $lbl )
+						);
+					}
+				};
+				?>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Typy produktów', 'wc-product-sync' ); ?></th>
+						<td>
+							<?php $wps_checkbox_group( 'sync_types', array(
+								'simple'   => __( 'Proste', 'wc-product-sync' ),
+								'variable' => __( 'Wariacyjne', 'wc-product-sync' ),
+								'grouped'  => __( 'Grupowane', 'wc-product-sync' ),
+							), $opts['sync_types'] ); ?>
+							<p class="description"><?php esc_html_e( 'Które typy synchronizować. Pozostałe są pomijane (z powodem w raporcie).', 'wc-product-sync' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Statusy w źródle', 'wc-product-sync' ); ?></th>
+						<td>
+							<?php $wps_checkbox_group( 'sync_statuses', array(
+								'publish' => 'publish', 'draft' => 'draft', 'pending' => 'pending', 'private' => 'private',
+							), $opts['sync_statuses'] ); ?>
+							<p class="description"><?php esc_html_e( 'Produkty z jakim statusem w źródle synchronizować. Domyślnie tylko opublikowane.', 'wc-product-sync' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Pola do synchronizacji', 'wc-product-sync' ); ?></th>
+						<td>
+							<?php $wps_checkbox_group( 'sync_fields', array(
+								'description' => __( 'Opis', 'wc-product-sync' ),
+								'price'       => __( 'Cena', 'wc-product-sync' ),
+								'stock'       => __( 'Stan magazynowy', 'wc-product-sync' ),
+								'images'      => __( 'Obrazy', 'wc-product-sync' ),
+								'categories'  => __( 'Kategorie', 'wc-product-sync' ),
+								'attributes'  => __( 'Atrybuty', 'wc-product-sync' ),
+								'dimensions'  => __( 'Waga i wymiary', 'wc-product-sync' ),
+							), $opts['sync_fields'] ); ?>
+							<p class="description"><?php esc_html_e( 'Odznaczone pola NIE są nadpisywane (przy tworzeniu i aktualizacji) — lokalne zmiany są zachowane. Nazwa, status i SKU są zawsze synchronizowane.', 'wc-product-sync' ); ?></p>
+						</td>
+					</tr>
 					<tr>
 						<th scope="row"><?php esc_html_e( 'Harmonogram', 'wc-product-sync' ); ?></th>
 						<td>
@@ -1364,6 +1448,10 @@ $defaults = array(
 
 	private function dispatch_upsert( array $p, $dry_run ) {
 		$type = $p['type'] ?? 'simple';
+		if ( ! $this->type_enabled( $type ) ) {
+			$this->last_skip_reason = sprintf( "typ '%s' wyłączony w ustawieniach", $type );
+			return 'skipped';
+		}
 		switch ( $type ) {
 			case 'simple':
 				return $this->upsert_simple( $p, $dry_run );
@@ -1475,12 +1563,16 @@ $defaults = array(
 	}
 
 	private function apply_common_fields( $product, array $p ) {
+		// Name + status are always managed (identity + publish state). Other fields are gated
+		// by the "co synchronizować → pola" setting so local edits can be preserved.
 		$product->set_name( (string) ( $p['name'] ?? '' ) );
 		$status = $p['status'] ?? 'publish';
 		$product->set_status( in_array( $status, array( 'publish', 'draft', 'pending', 'private' ), true ) ? $status : 'publish' );
-		$product->set_description( (string) ( $p['description'] ?? '' ) );
-		$product->set_short_description( (string) ( $p['short_description'] ?? '' ) );
-		if ( ! empty( $p['categories'] ) && is_array( $p['categories'] ) ) {
+		if ( $this->field_on( 'description' ) ) {
+			$product->set_description( (string) ( $p['description'] ?? '' ) );
+			$product->set_short_description( (string) ( $p['short_description'] ?? '' ) );
+		}
+		if ( $this->field_on( 'categories' ) && ! empty( $p['categories'] ) && is_array( $p['categories'] ) ) {
 			$ids = $this->resolve_category_ids( $p['categories'] );
 			if ( $ids ) {
 				$product->set_category_ids( $ids );
@@ -1489,6 +1581,9 @@ $defaults = array(
 	}
 
 	private function apply_physical( $obj, array $src ) {
+		if ( ! $this->field_on( 'dimensions' ) ) {
+			return;
+		}
 		if ( isset( $src['weight'] ) ) {
 			$obj->set_weight( (string) $src['weight'] );
 		}
@@ -1506,6 +1601,9 @@ $defaults = array(
 	}
 
 	private function apply_stock( $obj, array $src ) {
+		if ( ! $this->field_on( 'stock' ) ) {
+			return;
+		}
 		$manage = ! empty( $src['manage_stock'] );
 		$obj->set_manage_stock( $manage );
 		if ( $manage && isset( $src['stock_quantity'] ) ) {
@@ -1541,14 +1639,18 @@ $defaults = array(
 			$product->set_sku( $sku );
 		}
 		if ( 'WC_Product_Simple' === $wanted_class ) {
-			$product->set_regular_price( isset( $p['regular_price'] ) ? (string) $p['regular_price'] : '' );
-			$product->set_sale_price( isset( $p['sale_price'] ) ? (string) $p['sale_price'] : '' );
-			$this->apply_stock( $product, $p );
+			if ( $this->field_on( 'price' ) ) {
+				$product->set_regular_price( isset( $p['regular_price'] ) ? (string) $p['regular_price'] : '' );
+				$product->set_sale_price( isset( $p['sale_price'] ) ? (string) $p['sale_price'] : '' );
+			}
+			$this->apply_stock( $product, $p ); // self-gated by field_on('stock')
 		} elseif ( 'WC_Product_Variable' === $wanted_class ) {
-			if ( ! empty( $p['stock_status'] ) ) {
+			if ( $this->field_on( 'stock' ) && ! empty( $p['stock_status'] ) ) {
 				$product->set_stock_status( $p['stock_status'] );
 			}
-			$product->set_attributes( $this->build_parent_attributes( $p['attributes'] ?? array() ) );
+			if ( $this->field_on( 'attributes' ) ) {
+				$product->set_attributes( $this->build_parent_attributes( $p['attributes'] ?? array() ) );
+			}
 		}
 		$this->apply_physical( $product, $p );
 
@@ -1580,14 +1682,18 @@ $defaults = array(
 			$product->set_sku( $sku );
 		}
 		if ( 'WC_Product_Simple' === $wanted_class ) {
-			$product->set_regular_price( isset( $p['regular_price'] ) ? (string) $p['regular_price'] : '' );
-			$product->set_sale_price( isset( $p['sale_price'] ) ? (string) $p['sale_price'] : '' );
-			$this->apply_stock( $product, $p );
+			if ( $this->field_on( 'price' ) ) {
+				$product->set_regular_price( isset( $p['regular_price'] ) ? (string) $p['regular_price'] : '' );
+				$product->set_sale_price( isset( $p['sale_price'] ) ? (string) $p['sale_price'] : '' );
+			}
+			$this->apply_stock( $product, $p ); // self-gated by field_on('stock')
 		} elseif ( 'WC_Product_Variable' === $wanted_class ) {
-			if ( ! empty( $p['stock_status'] ) ) {
+			if ( $this->field_on( 'stock' ) && ! empty( $p['stock_status'] ) ) {
 				$product->set_stock_status( $p['stock_status'] );
 			}
-			$product->set_attributes( $this->build_parent_attributes( $p['attributes'] ?? array() ) );
+			if ( $this->field_on( 'attributes' ) ) {
+				$product->set_attributes( $this->build_parent_attributes( $p['attributes'] ?? array() ) );
+			}
 		}
 		$this->apply_physical( $product, $p );
 
@@ -1596,7 +1702,7 @@ $defaults = array(
 			throw new \RuntimeException( 'save() zwróciło 0' );
 		}
 		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
-		if ( ! empty( $p['images'] ) ) {
+		if ( $this->field_on( 'images' ) && ! empty( $p['images'] ) ) {
 			$this->set_product_images( $id, $p['images'] );
 		}
 		if ( 'WC_Product_Variable' === $wanted_class ) {
@@ -1786,14 +1892,16 @@ $defaults = array(
 					$variation->set_sku( $svsku );
 				}
 				$variation->set_status( ( $sv['status'] ?? 'publish' ) === 'private' ? 'private' : 'publish' );
-				$variation->set_regular_price( isset( $sv['regular_price'] ) ? (string) $sv['regular_price'] : '' );
-				$variation->set_sale_price( isset( $sv['sale_price'] ) ? (string) $sv['sale_price'] : '' );
+				if ( $this->field_on( 'price' ) ) {
+					$variation->set_regular_price( isset( $sv['regular_price'] ) ? (string) $sv['regular_price'] : '' );
+					$variation->set_sale_price( isset( $sv['sale_price'] ) ? (string) $sv['sale_price'] : '' );
+				}
 				$this->apply_stock( $variation, $sv );
 				$this->apply_physical( $variation, $sv );
 				$variation->set_attributes( $attrs );
 
 				$new_vid = $variation->save();
-				if ( ! $is_update && ! empty( $sv['image']['src'] ) ) {
+				if ( $this->field_on( 'images' ) && ! $is_update && ! empty( $sv['image']['src'] ) ) {
 					$att = $this->sideload_single( $sv['image']['src'], $new_vid );
 					if ( $att ) {
 						$variation->set_image_id( $att );
@@ -1920,7 +2028,7 @@ $defaults = array(
 			throw new \RuntimeException( 'save() zwróciło 0' );
 		}
 		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
-		if ( ! $is_update && ! empty( $p['images'] ) ) {
+		if ( $this->field_on( 'images' ) && ! $is_update && ! empty( $p['images'] ) ) {
 			$this->set_product_images( $id, $p['images'] );
 		}
 		$this->mark_synced( $id );
@@ -2162,7 +2270,7 @@ $defaults = array(
 	}
 
 	private function should_sync_status( $source_status ) {
-		$allowed = apply_filters( 'wps_sync_statuses', array( 'publish' ), $source_status );
+		$allowed = apply_filters( 'wps_sync_statuses', (array) $this->get_options()['sync_statuses'], $source_status );
 		return in_array( $source_status, (array) $allowed, true );
 	}
 	/* =====================================================================
