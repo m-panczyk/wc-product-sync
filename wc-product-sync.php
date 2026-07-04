@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.7.0
+ * Version:           0.8.1
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -24,9 +24,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 final class WC_Product_Sync {
 
 	const OPTION_KEY      = 'wc_product_sync_options';
-	const CRON_HOOK       = 'wc_product_sync_daily_event';
-	const LOG_SOURCE      = 'wc-product-sync';
-	const NONCE_ACTION    = 'wc_product_sync_run';
+	const CRON_HOOK        = 'wc_product_sync_daily_event';
+	const RESUME_HOOK      = 'wps_sync_resume'; // batch continuation via cron
+	const LOG_SOURCE       = 'wc-product-sync';
+	const NONCE_ACTION     = 'wc_product_sync_run';
 	const SYNC_LOCK_TRANSIENT  = 'wps_sync_running';
 	const SYNC_PROGRESS_TRANSIENT = 'wps_sync_progress';
 
@@ -46,6 +47,8 @@ final class WC_Product_Sync {
 	private $attr_map_cache = array();
 	/** Mapa źródłowe product_id => sku (dla grouped) */
 	private $source_id_to_sku = array();
+	/** Ostatnie total_pages pobrane z nagłówka X-WP-TotalPages */
+	private $last_total_pages = 0;
 	/** Czy pobieranie źródła napotkało błąd (blokada soft-delete) */
 	private $fetch_had_error = false;
 	/** Czy pobieranie wariacji napotkało błąd (blokada usunięć) */
@@ -64,9 +67,9 @@ final class WC_Product_Sync {
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 		add_action( 'admin_post_wc_product_sync_run', array( $this, 'handle_manual_run' ) );
-		add_action( 'admin_post_wc_product_sync_continue', array( $this, 'handle_continue_sync' ) );
 		add_action( 'admin_post_wc_product_sync_cancel', array( $this, 'handle_cancel_sync' ) );
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
+		add_action( self::RESUME_HOOK, array( $this, 'run_resume_batch' ) );
 		add_action( 'admin_notices', array( $this, 'maybe_wc_missing_notice' ) );
 	}
 
@@ -123,13 +126,15 @@ final class WC_Product_Sync {
 	 *  Progress tracking (batching + resume)
 	 * ================================================================== */
 
-	private function save_sync_progress( $current_page, $products_processed, $total_products ) {
+private function save_sync_progress( $current_page, $products_processed, $total_products ) {
 		set_transient( self::SYNC_PROGRESS_TRANSIENT, array(
-			'current_page'      => absint( $current_page ),
-			'products_processed' => absint( $products_processed ),
-			'total_products'    => absint( $total_products ),
-			'started_at'        => time(),
-		), 900 );
+			'current_page'     => $current_page,
+			'products_processed' => $products_processed,
+			'total_products'   => $total_products,
+			'total_pages'      => $this->last_total_pages, // Store for resume calculations
+			'per_page'         => $this->cfg_per_page(),    // Store per_page for resume
+			'started_at'       => time(),
+		), 3600 ); // Persist for 1 hour (enough for all batches to finish)
 	}
 
 	private function get_sync_progress() {
@@ -143,7 +148,65 @@ final class WC_Product_Sync {
 	private function cancel_sync() {
 		delete_transient( self::SYNC_LOCK_TRANSIENT );
 		$this->clear_sync_progress();
+		wp_clear_scheduled_hook( self::RESUME_HOOK );
 		$this->log( 'info', 'Synchronizacja anulowana przez użytkownika.' );
+	}
+
+	/** Resume batch: called by WP-Cron to continue sync from saved progress. */
+	public function run_resume_batch() {
+		$progress = $this->get_sync_progress();
+		if ( ! $progress ) {
+			$this->log( 'info', 'No progress found for resume — nothing to do.' );
+			return;
+		}
+
+		$total = $progress['total_products'];
+	$processed = $progress['products_processed'];
+	$current_page = $progress['current_page'];
+
+	// Recompute true total from stored total_pages × per_page (more reliable than running count)
+	if ( isset( $progress['total_pages'], $progress['per_page'] ) && $progress['total_pages'] > 0 ) {
+		$total = $progress['total_pages'] * $progress['per_page'];
+	}
+
+	// Check if already complete — don't clear yet, let run_sync_inner decide
+	if ( $processed >= $total ) {
+		$this->log( 'info', sprintf( 'Resume: already at %d/%d — checking with inner.', $processed, $total ) );
+	}
+
+		$this->log( 'info', sprintf( 'Resuming batch: %d/%d products...', $processed, $total ) );
+		$stats = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 );
+		$this->run_sync_inner( false, $stats, $progress );
+
+		// Check if still in progress after resume
+		$new_progress = $this->get_sync_progress();
+		$sync_complete = false;
+		if ( ! $new_progress ) {
+			// Progress cleared inside run_sync_inner — sync completed fully
+			$sync_complete = true;
+		} else if ( isset( $new_progress['total_pages'], $new_progress['per_page'] )
+				&& $new_progress['current_page'] > $new_progress['total_pages'] ) {
+			// We're past the last known page — sync completed fully
+			$sync_complete = true;
+		}
+
+		if ( $sync_complete ) {
+			$this->clear_sync_progress();
+			delete_transient( self::SYNC_LOCK_TRANSIENT );
+			$this->log( 'info', 'Resumed batch completed successfully.' );
+		} else {
+			// Calculate remaining products based on page progress
+			$pages_done   = $new_progress['current_page'] - 1; // last completed page
+			$pages_total  = $new_progress['total_pages'] ?: 0;
+			$per_page     = $new_progress['per_page'] ?: $this->cfg_per_page();
+			$remaining    = max( 0, ( $pages_total - $pages_done ) * $per_page );
+			// Schedule next resume after this batch
+			if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
+				wp_clear_scheduled_hook( self::RESUME_HOOK );
+			}
+			wp_schedule_single_event( time() + 5, self::RESUME_HOOK ); // Wait 5s before next batch
+			$this->log( 'info', sprintf( 'Batch finished. %d products remaining — scheduled next batch.', $remaining ) );
+		}
 	}
 
 	private function format_duration( $seconds ) {
@@ -316,9 +379,12 @@ $defaults = array(
 			}
 			echo '</p>';
 
-			printf( '<p><a href="%s" class="button button-secondary" style="margin-right:8px;">Kontynuuj</a>',
-				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_continue' ), self::NONCE_ACTION ) );
-			printf( '<a href="%s" class="button button-link-danger" onclick="return confirm(\'Anulować synchronizację?\');">Anuluj</a>',
+			// Auto-batch info — no manual continue needed anymore
+			echo '<p class="description" style="margin:8px 0 0;">';
+			echo esc_html__( 'Synchronizacja jest automatycznie kontynuowana batch po batchu przez WP-Cron. Strona może być zamknięta.', 'wc-product-sync' );
+			echo '</p>';
+
+			printf( '<p><a href="%s" class="button button-link-danger" onclick="return confirm(\'Anulować synchronizację?\');">Anuluj</a>',
 				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_cancel' ), self::NONCE_ACTION . '_cancel' ) );
 			echo '</p>';
 			echo '</div>';
@@ -384,7 +450,7 @@ $defaults = array(
 					<th scope="row"><label for="wps_blim"><?php esc_html_e( 'Limit produktów na batch', 'wc-product-sync' ); ?></label></th>
 					<td><input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[sync_batch_limit]" id="wps_blim" type="number" min="0" class="small-text"
 						value="<?php echo esc_attr( $opts['sync_batch_limit'] ); ?>" />
-						<p class="description"><?php esc_html_e( 'Po tej liczbie produktów sync się zatrzyma — kliknij "Kontynuuj" w UI. 0 = bez limitu (legacy, wolne).', 'wc-product-sync' ); ?></p></td>
+<p class="description"><?php esc_html_e( 'Liczba produktów przetwarzana w jednym batchu przez WP-Cron. Sync kontynuuje automatycznie po zakończeniu każdego batcha (co 30s). 0 = bez limitu.', 'wc-product-sync' ); ?></p></td>
 				</tr>
 					<tr>
 						<th scope="row"><?php esc_html_e( 'Harmonogram', 'wc-product-sync' ); ?></th>
@@ -482,40 +548,6 @@ $defaults = array(
 
 		$dry_run = isset( $_GET['mode'] ) && 'dry' === $_GET['mode'];
 		$stats   = $this->run_sync( $dry_run );
-		wp_safe_redirect( add_query_arg(
-			array(
-				'page'    => 'wc-product-sync',
-				'synced'  => 1,
-				'created' => $stats['created'],
-				'updated' => $stats['updated'],
-				'skipped' => $stats['skipped'],
-				'errors'  => $stats['errors'],
-			),
-			admin_url( 'admin.php' )
-		) );
-		exit;
-	}
-
-	public function handle_continue_sync() {
-		if ( ! current_user_can( 'manage_woocommerce' ) ) {
-			wp_die( esc_html__( 'Brak uprawnień.', 'wc-product-sync' ) );
-		}
-		check_admin_referer( self::NONCE_ACTION );
-
-		$progress = $this->get_sync_progress();
-		if ( ! $progress ) {
-			wp_safe_redirect( admin_url( 'admin.php?page=wc-product-sync' ) );
-			exit;
-		}
-
-		if ( function_exists( 'ignore_user_abort' ) ) {
-			@ignore_user_abort( true );
-		}
-
-		// Clear the existing lock so run_sync() can set a fresh one
-		delete_transient( self::SYNC_LOCK_TRANSIENT );
-		$stats = $this->run_sync( false );
-
 		wp_safe_redirect( add_query_arg(
 			array(
 				'page'    => 'wc-product-sync',
@@ -706,20 +738,29 @@ $defaults = array(
 		}
 
 		set_transient( self::SYNC_LOCK_TRANSIENT, time(), 1800 );
+		$still_batching = false; // Track if we hit batch limit and need cron reschedule
 
 		try {
-			return $this->run_sync_inner( $dry_run, $stats, $progress );
+			$result = $this->run_sync_inner( $dry_run, $stats, $progress, $still_batching );
+			return $result;
+		} catch ( \Exception $e ) {
+			$this->log( 'error', 'Wyjątek w sync: ' . $e->getMessage() );
+			return $stats;
 		} finally {
 			delete_transient( self::SYNC_LOCK_TRANSIENT );
-			$this->clear_sync_progress();
+			// Don't clear progress if we're still batching — cron will handle it
+			if ( ! $still_batching ) {
+				$this->clear_sync_progress();
+			}
 		}
 	}
 
-	private function run_sync_inner( $dry_run, &$stats, $progress = null ) {
+	private function run_sync_inner( $dry_run, &$stats, $progress = null, &$still_batching = false ) {
 		$this->log( 'info', '=== Start synchronizacji' . ( $dry_run ? ' [DRY RUN]' : '' ) . ' ===' );
 
 		// Pełna synchronizacja – usuń stare lokalne produkty.
-		$force_full = ! empty( $this->get_options()['force_full_sync'] );
+		// SKIP if we're resuming from batch (progress exists) — full sync already done in initial run
+		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && empty( $progress );
 		if ( $force_full && ! $dry_run ) {
 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
 			global $wpdb;
@@ -745,15 +786,24 @@ $defaults = array(
 
 		$per_page = $this->cfg_per_page();
 		$batch_limit = (int) $this->get_options()['sync_batch_limit']; // 0 = unlimited
-		$page = $progress ? $progress['current_page'] : 1;
+		$page = $progress ? $progress['current_page'] + 1 : 1; // Resume from NEXT page (current already processed)
 		$products_processed = $progress ? $progress['products_processed'] : 0;
+
+		// For batched syncs, track how many we process in THIS batch vs overall
+		$batch_start_count = $products_processed;
+
+		// Load total_pages from saved progress (persists across PHP processes)
+		$total_pages = 0;
+		if ( $progress && isset( $progress['total_pages'] ) && $progress['total_pages'] > 0 ) {
+			$total_pages   = absint( $progress['total_pages'] );
+			$this->last_total_pages = $total_pages; // keep alive across resume batches (B1 fix)
+		}
 
 		$this->source_attributes = $this->fetch_source_attributes();
 
 		$total_counted = 0;
 		$source_keys   = array();
 		$grouped_buf   = array();
-		$total_pages   = 0;
 
 		do {
 			$batch = $this->fetch_product_page( $page );
@@ -765,16 +815,25 @@ $defaults = array(
 
 			$count = count( $batch );
 			if ( 0 === $count ) {
-				break;
+				// No more products on this page — sync is complete!
+				// Save final progress so run_resume_batch knows it's done
+				$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
+				$this->save_sync_progress( $page, $products_processed, $true_total );
+				return $stats; // Don't clear here — caller handles it
 			}
 
 			// Capture total pages from WC REST API header on first page
 			if ( 1 === $page ) {
 				if ( isset( $this->last_api_headers['X-WP-TotalPages'] ) ) {
 					$total_pages = absint( $this->last_api_headers['X-WP-TotalPages'] );
+					$this->last_total_pages = $total_pages;
 				} elseif ( isset( $this->last_api_headers['x-wp-totalpages'] ) ) {
 					$total_pages = absint( $this->last_api_headers['x-wp-totalpages'] );
+					$this->last_total_pages = $total_pages;
 				}
+			} else if ( ! $total_pages && $this->last_total_pages > 0 ) {
+				// Subsequent pages use the total captured from first page
+				$total_pages = $this->last_total_pages;
 			}
 
 			$total_counted += $count;
@@ -783,10 +842,18 @@ $defaults = array(
 			foreach ( $batch as $p ) {
 				$products_processed++;
 
-				// Batch limit check — save progress and stop if we've hit the limit
-				if ( $batch_limit > 0 && $products_processed > $batch_limit ) {
-					$this->save_sync_progress( $page, $products_processed - 1, $total_counted );
-					$this->log( 'info', sprintf( 'Limit batchu (%d produktów) osiągnięty — wznowienie z %d,% strona %d.', $batch_limit, $products_processed - 1, $page ) );
+				// Batch limit check — save progress and stop if this batch hit its limit
+				if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
+					$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
+					$this->save_sync_progress( $page, $products_processed, $true_total );
+					$this->log( 'info', sprintf( 'Limit batchu (%d produktów) osiągnięty — harmonogramowanie wznowienia.', $batch_limit ) );
+
+					$still_batching = true;
+					if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
+						wp_clear_scheduled_hook( self::RESUME_HOOK );
+					}
+					wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // 30s buffer for HTTP request to finish
+
 					return $stats;
 				}
 
@@ -811,7 +878,8 @@ $defaults = array(
 
 				// Update progress every 10 products (avoid transient thrashing)
 				if ( $products_processed % 10 === 0 ) {
-					$this->save_sync_progress( $page, $products_processed, $total_counted );
+					$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
+					$this->save_sync_progress( $page, $products_processed, $true_total );
 				}
 			}
 
@@ -822,9 +890,17 @@ $defaults = array(
 		// Process grouped products
 		foreach ( $grouped_buf as $p ) {
 			$products_processed++;
-			if ( $batch_limit > 0 && $products_processed > $batch_limit ) {
-				$this->save_sync_progress( $page, $products_processed - 1, $total_counted );
-				$this->log( 'info', sprintf( 'Limit batchu (%d) osiągnięty przy grouped: %s.', $batch_limit, $p['name'] ?? '?' ) );
+			if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
+				$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
+					$this->save_sync_progress( $page, $products_processed, $true_total );
+				$this->log( 'info', sprintf( 'Limit batchu (%d) osiągnięty przy grouped: %s — harmonogramowanie wznowienia.', $batch_limit, $p['name'] ?? '?' ) );
+
+				$still_batching = true;
+				if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
+					wp_clear_scheduled_hook( self::RESUME_HOOK );
+				}
+				wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // 30s buffer for HTTP request to finish
+
 				return $stats;
 			}
 			$this->process_single_product( $p, $dry_run, $stats );
@@ -832,8 +908,12 @@ $defaults = array(
 
 		// If we completed all pages, clear progress (full sync done)
 		if ( $count < $per_page && 0 !== $total_pages ) {
-			$this->log( 'info', sprintf( 'Wszystkie %d strony przetworzone.', $page - 1 ) );
-			// Don't clear progress yet — wait for soft_delete check to finish
+			$this->log( 'info', sprintf( 'Wszystkie %d/%d strony przetworzone.', $page - 1, $total_pages ) );
+			// Clear progress — sync is truly done
+		} else {
+			// Still more pages to fetch but we hit batch limit — DON'T clear progress yet
+			$this->log( 'info', sprintf( 'Limit batchu osiągnięty — pozostawiam progress do wznowienia.' ) );
+			return $stats; // Exit early, don't reach the clear at bottom
 		}
 
 		if ( function_exists( 'gc_collect_cycles' ) ) gc_collect_cycles();
