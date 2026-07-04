@@ -160,51 +160,49 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			return;
 		}
 
+		// Check if a manual sync is already running (Codex #6 fix: sync lock)
+		$lock = get_transient( self::SYNC_LOCK_TRANSIENT );
+		if ( false !== $lock ) {
+			$this->log( 'info', sprintf( 'Sync lock active (%ds ago) — deferring resume.', time() - $lock ) );
+			return;
+		}
+
 		$total = $progress['total_products'];
-	$processed = $progress['products_processed'];
-	$current_page = $progress['current_page'];
+		$processed = $progress['products_processed'];
+		$current_page = $progress['current_page'];
 
-	// Recompute true total from stored total_pages × per_page (more reliable than running count)
-	if ( isset( $progress['total_pages'], $progress['per_page'] ) && $progress['total_pages'] > 0 ) {
-		$total = $progress['total_pages'] * $progress['per_page'];
-	}
+		// Recompute true total from stored total_pages × per_page (more reliable than running count)
+		if ( isset( $progress['total_pages'], $progress['per_page'] ) && $progress['total_pages'] > 0 ) {
+			$total = $progress['total_pages'] * $progress['per_page'];
+		}
 
-	// Check if already complete — don't clear yet, let run_sync_inner decide
-	if ( $processed >= $total ) {
-		$this->log( 'info', sprintf( 'Resume: already at %d/%d — checking with inner.', $processed, $total ) );
-	}
-
-		$this->log( 'info', sprintf( 'Resuming batch: %d/%d products...', $processed, $total ) );
+		$this->log( 'info', sprintf( 'Resuming batch: %d/%d products, strona %d...', $processed, $total, $current_page + 1 ) );
 		$stats = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 );
-		$this->run_sync_inner( false, $stats, $progress );
+
+		// Set sync lock for this resume batch (Codex #6 fix)
+		set_transient( self::SYNC_LOCK_TRANSIENT, time(), 1800 );
+		try {
+			$this->run_sync_inner( false, $stats, $progress );
+		} finally {
+			delete_transient( self::SYNC_LOCK_TRANSIENT );
+		}
 
 		// Check if still in progress after resume
 		$new_progress = $this->get_sync_progress();
-		$sync_complete = false;
-		if ( ! $new_progress ) {
-			// Progress cleared inside run_sync_inner — sync completed fully
-			$sync_complete = true;
-		} else if ( isset( $new_progress['total_pages'], $new_progress['per_page'] )
-				&& $new_progress['current_page'] > $new_progress['total_pages'] ) {
-			// We're past the last known page — sync completed fully
-			$sync_complete = true;
-		}
+		$sync_complete = empty( $new_progress ); // Progress cleared by run_sync_inner when done
 
 		if ( $sync_complete ) {
-			$this->clear_sync_progress();
-			delete_transient( self::SYNC_LOCK_TRANSIENT );
 			$this->log( 'info', 'Resumed batch completed successfully.' );
 		} else {
-			// Calculate remaining products based on page progress
-			$pages_done   = $new_progress['current_page'] - 1; // last completed page
-			$pages_total  = $new_progress['total_pages'] ?: 0;
-			$per_page     = $new_progress['per_page'] ?: $this->cfg_per_page();
-			$remaining    = max( 0, ( $pages_total - $pages_done ) * $per_page );
-			// Schedule next resume after this batch
+			// Schedule next resume using same 30s interval as initial batch (Codex #7 fix: consistency)
+			$pages_total = $new_progress['total_pages'] ?: 0;
+			$per_page    = $new_progress['per_page'] ?: $this->cfg_per_page();
+			$remaining   = max( 0, ( $pages_total - $new_progress['current_page'] ) * $per_page );
+
 			if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
 				wp_clear_scheduled_hook( self::RESUME_HOOK );
 			}
-			wp_schedule_single_event( time() + 5, self::RESUME_HOOK ); // Wait 5s before next batch
+			wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // Consistent 30s interval (Codex #7 fix)
 			$this->log( 'info', sprintf( 'Batch finished. %d products remaining — scheduled next batch.', $remaining ) );
 		}
 	}
@@ -842,21 +840,6 @@ $defaults = array(
 			foreach ( $batch as $p ) {
 				$products_processed++;
 
-				// Batch limit check — save progress and stop if this batch hit its limit
-				if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
-					$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
-					$this->save_sync_progress( $page, $products_processed, $true_total );
-					$this->log( 'info', sprintf( 'Limit batchu (%d produktów) osiągnięty — harmonogramowanie wznowienia.', $batch_limit ) );
-
-					$still_batching = true;
-					if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
-						wp_clear_scheduled_hook( self::RESUME_HOOK );
-					}
-					wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // 30s buffer for HTTP request to finish
-
-					return $stats;
-				}
-
 				// Track source keys
 				$sku = isset( $p['sku'] ) ? trim( $p['sku'] ) : '';
 				if ( '' !== $sku ) {
@@ -875,15 +858,26 @@ $defaults = array(
 				} else {
 					$this->process_single_product( $p, $dry_run, $stats );
 				}
-
-				// Update progress every 10 products (avoid transient thrashing)
-				if ( $products_processed % 10 === 0 ) {
-					$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
-					$this->save_sync_progress( $page, $products_processed, $true_total );
-				}
 			}
 
 			unset( $batch );
+
+			// Progress saved only at page boundaries (Codex #2 fix: no mid-page saves)
+			$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
+			$this->save_sync_progress( $page, $products_processed, $true_total );
+
+			// Batch limit check AFTER completing the page (Codex #3 fix: process-before-check)
+			if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
+				$still_batching   = true;
+				$this->log( 'info', sprintf( 'Limit batchu (%d produktów) osiągnięty po stronie %d — harmonogramowanie wznowienia.', $batch_limit, $page ) );
+
+				if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
+					wp_clear_scheduled_hook( self::RESUME_HOOK );
+				}
+				wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // 30s buffer
+				return $stats;
+			}
+
 			$page++;
 		} while ( $count === $per_page );
 
@@ -891,16 +885,13 @@ $defaults = array(
 		foreach ( $grouped_buf as $p ) {
 			$products_processed++;
 			if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
-				$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
-					$this->save_sync_progress( $page, $products_processed, $true_total );
-				$this->log( 'info', sprintf( 'Limit batchu (%d) osiągnięty przy grouped: %s — harmonogramowanie wznowienia.', $batch_limit, $p['name'] ?? '?' ) );
-
 				$still_batching = true;
+				$this->log( 'info', sprintf( 'Limit batchu (%d) osiągnięty przy grouped: %s.', $batch_limit, $p['name'] ?? '?' ) );
+
 				if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
 					wp_clear_scheduled_hook( self::RESUME_HOOK );
 				}
-				wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // 30s buffer for HTTP request to finish
-
+				wp_schedule_single_event( time() + 30, self::RESUME_HOOK );
 				return $stats;
 			}
 			$this->process_single_product( $p, $dry_run, $stats );
