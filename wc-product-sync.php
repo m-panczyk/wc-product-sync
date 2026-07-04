@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.5
+ * Version:           0.9.6
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -67,6 +67,8 @@ final class WC_Product_Sync {
 	private $last_match_method = '';
 	/** Powód pominięcia ostatniego produktu (dla raportu) */
 	private $last_skip_reason = '';
+	/** Czy trwa AKTUALIZACJA (true) czy TWORZENIE (false) — pola bramkujemy tylko przy aktualizacji */
+	private $writing_update = false;
 	/** Ostatnie nagłówki odpowiedzi REST API (X-WP-TotalPages) */
 	private $last_api_headers = array();
 
@@ -437,9 +439,12 @@ $defaults = array(
 		return in_array( $type, (array) $this->get_options()['sync_types'], true );
 	}
 
-	/** Should this data field be written? (fields to sync — settings). A disabled field is
-	 *  never touched on create or update, so local edits to it are preserved. */
+	/** Should this data field be written? On CREATE everything is imported; on UPDATE a field
+	 *  disabled in settings is skipped, so local edits to it are preserved (#2). */
 	private function field_on( $field ) {
+		if ( ! $this->writing_update ) {
+			return true; // creating a new product → import all fields
+		}
 		return in_array( $field, (array) $this->get_options()['sync_fields'], true );
 	}
 
@@ -1664,6 +1669,7 @@ $defaults = array(
 			return 'updated';
 		}
 
+		$this->writing_update = true; // gate fields to preserve local edits (#2)
 		$product = $this->ensure_product_type( $existing_id, $wanted_class, $wanted_term );
 		$this->apply_common_fields( $product, $p );
 		if ( '' !== $sku ) {
@@ -1690,6 +1696,12 @@ $defaults = array(
 			throw new \RuntimeException( 'save() zwróciło 0' );
 		}
 		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
+		// #1: re-sync variations on UPDATE too (previously only on create), so variation
+		// price/stock changes and added/removed variations in the source are reflected.
+		if ( 'WC_Product_Variable' === $wanted_class ) {
+			$this->sync_variations( $id, (int) $p['id'] );
+			WC_Product_Variable::sync( $id );
+		}
 		$this->mark_synced( $id );
 		$this->log( 'info', sprintf( 'Zaktualizowano %s: %s (ID=%d)', $wanted_term, $p['name'], $id ) );
 		return 'updated';
@@ -1707,6 +1719,7 @@ $defaults = array(
 			return 'created';
 		}
 
+		$this->writing_update = false; // creating → import all fields (#2)
 		$product = new $wanted_class();
 		$this->apply_common_fields( $product, $p );
 		if ( '' !== $sku ) {
@@ -2047,6 +2060,7 @@ $defaults = array(
 			return $is_update ? 'updated' : 'created';
 		}
 
+		$this->writing_update = $is_update; // gate fields only when updating an existing grouped (#2)
 		$product = $this->ensure_product_type( $existing_id, 'WC_Product_Grouped', 'grouped' );
 		$this->apply_common_fields( $product, $p );
 		if ( $sku ) {
