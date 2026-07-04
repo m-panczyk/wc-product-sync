@@ -189,7 +189,19 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 
 		// Check if still in progress after resume
 		$new_progress = $this->get_sync_progress();
-		$sync_complete = empty( $new_progress ); // Progress cleared by run_sync_inner when done
+		$sync_complete = false;
+
+		if ( ! $new_progress ) {
+			// run_sync_inner() cleared progress — sync completed fully
+			$sync_complete = true;
+		} else if ( $processed === $new_progress['products_processed'] && $new_progress['current_page'] < $new_progress['total_pages'] ) {
+			// No new work done during this resume and we expected more pages.
+			// This happens when run_sync_inner() hit an empty page early.
+			// All remaining content is exhausted — clear stale progress (Codex #1 fix: prevents infinite resume loop).
+			$this->clear_sync_progress();
+			$sync_complete = true;
+			$this->log( 'info', sprintf( 'Resume completed: no more pages to fetch from page %d (expected %d total).', $current_page + 1, $new_progress['total_pages'] ) );
+		}
 
 		if ( $sync_complete ) {
 			$this->log( 'info', 'Resumed batch completed successfully.' );
@@ -814,10 +826,8 @@ $defaults = array(
 			$count = count( $batch );
 			if ( 0 === $count ) {
 				// No more products on this page — sync is complete!
-				// Save final progress so run_resume_batch knows it's done
-				$true_total = $total_pages > 0 ? $total_pages * $per_page : $total_counted;
-				$this->save_sync_progress( $page, $products_processed, $true_total );
-				return $stats; // Don't clear here — caller handles it
+				// Don't save progress: no work done, and run_resume_batch() handles completion detection.
+				return $stats; // Caller handles clearing/cleanup
 			}
 
 			// Capture total pages from WC REST API header on first page

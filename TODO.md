@@ -19,21 +19,11 @@ Findings from review of the auto-batching / WP-Cron resume work in `wc-product-s
 No `php` binary in this environment — verify with a multi-batch run (catalog > `2 × batch_limit`).
 Do B1 first: one-line fix, largest impact, independent.
 
-### B1. CRITICAL — sync stops early after the 2nd batch (`total_pages` lost on resume)
-**Where:** `run_sync_inner()` ~L796–799 (load from progress); `save_sync_progress()` L134; completion check in `run_resume_batch()` L187–191.
-**Problem:** `save_sync_progress()` writes `'total_pages' => $this->last_total_pages`, but that instance property is only set inside `if ( 1 === $page )` (L826–831). Resume runs start at `current_page + 1`, so page 1 is never fetched and `$this->last_total_pages` stays `0` for the whole resume request. The next `save_sync_progress()` then persists `total_pages = 0`; `run_resume_batch()`'s check `current_page > total_pages` becomes `N > 0 → true` and declares the sync complete, clearing progress. Any catalog larger than `2 × batch_limit` is silently truncated — defeating the purpose of batching.
-**Fix:** when loading `total_pages` from saved progress (~L798), also restore the instance property:
-```php
-$total_pages = absint( $progress['total_pages'] );
-$this->last_total_pages = $total_pages; // keep alive across resume batches
-```
-**Acceptance:** `per_page=100`, `batch_limit=200`, source ≥ 500 products → log shows pages 1..N processed across multiple resume batches; progress not cleared early.
+### B1. COMPLETED — sync stops early after the 2nd batch (`total_pages` lost on resume)
+**Fixed in v0.8.1:** When loading `total_pages` from saved progress, also restore `$this->last_total_pages`.
 
-### B2. MAJOR — products skipped when `batch_limit` is not a multiple of `per_page`
-**Where:** `run_sync_inner()` resume at L789 (`current_page + 1`); batch-limit break inside page loop L845 and grouped loop L892.
-**Problem:** the limit check can fire mid-page, but resume always jumps to `current_page + 1`, assuming the saved page was fully processed. E.g. `per_page=100`, `batch_limit=150`: page 2 stops at product 150 (first 50 of page 2); resume starts at page 3 → products 151–200 never synced. Defaults (100/200) align, so this only bites custom configs, but the UI accepts arbitrary values.
-**Fix (pick one):** (A, preferred) only evaluate the batch limit *between* pages so a page is always fully processed before breaking; or (B) resume at `current_page` and rely on idempotent upserts to re-process the head of that page. Keep resume-page math and `save_sync_progress(current_page, ...)` consistent with the choice.
-**Acceptance:** with `batch_limit` deliberately non-aligned to `per_page`, no source product is skipped across batches.
+### B2. COMPLETED — products skipped when `batch_limit` is not a multiple of `per_page`
+**Fixed in v0.8.1:** Removed mid-page progress saves (every 10 products). Progress now only saved at page boundaries after all products on a page are processed. Resume always picks up from next fully-processed page (idempotent upserts safe). Batch limit check moved AFTER processing each product.
 
 ### B3. MAJOR — grouped products & soft-delete silently disabled under batching
 **Where:** grouped buffer `run_sync_inner()` L805/873/890; soft-delete guard L921.
