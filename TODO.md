@@ -1,6 +1,6 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.8.0**
+Current version: **0.8.2** (auto-batching v0.8.1 + batch loop fixes)
 Target file: `wc-product-sync.php` (single-file WordPress plugin).
 
 General rules for the agent:
@@ -26,17 +26,29 @@ Do B1 first: one-line fix, largest impact, independent.
 **Fixed in v0.8.1:** Removed mid-page progress saves (every 10 products). Progress now only saved at page boundaries after all products on a page are processed. Resume always picks up from next fully-processed page (idempotent upserts safe). Batch limit check moved AFTER processing each product.
 
 ### B3. MAJOR — grouped products & soft-delete silently disabled under batching
-**Where:** grouped buffer `run_sync_inner()` L805/873/890; soft-delete guard L921.
-**Problem:** both are whole-catalog operations assuming a single pass. Grouped products are buffered in `$grouped_buf` and only processed after the page loop; a batch returning early at the limit discards the buffer and resume starts at a later page, so grouped items on already-fetched pages are never processed (`$source_id_to_sku` is also rebuilt per batch). Soft-delete is guarded by `empty( $progress )` so it never runs on a resumed batch (protective — a partial `$source_keys` would wrongly draft most of the catalog — but net effect is soft-delete never runs once batching engages).
+**Where:** grouped buffer `run_sync_inner()`; soft-delete guard L921.
+**Problem:** both are whole-catalog operations assuming a single pass. Grouped products are buffered in `$grouped_buf` and only processed after the page loop; a batch returning early at the limit discards the buffer and resume starts at a later page, so grouped items on already-fetched pages are never processed. Soft-delete is guarded by `empty( $progress )` so it never runs on a resumed batch (protective — a partial `$source_keys` would wrongly soft-delete most of the catalog).
+**Note from Codex round 2:** grouped products increment `products_processed` count twice (once in main loop when added to buffer, once when processed in grouped loop), inflating progress numbers. Soft-delete uses `$source_keys` rebuilt per PHP process, so on final resume batch it only has keys from that single batch — risk of incorrectly soft-deleting products from earlier batches.
 **Fix (needs design decision — flag to owner):** accumulate `$source_keys` + grouped/child-SKU maps in the persisted progress transient and run grouped processing + soft-delete only on the final batch using the full set; OR run them in a dedicated final cron step after all pages; OR (minimum) document in the settings UI that grouped products and soft-delete are unsupported while batching is enabled, and skip them without corrupting data.
 **Acceptance:** with batching enabled, grouped products sync correctly and soft-delete either runs on the complete set or is clearly documented as disabled.
 
-### B4. MINOR — cleanups
-- Remove dead `foreach_product()` (L636) — no longer called; `run_sync_inner()` has its own loop.
-- Progress UI shows `strona X/?` — `render_admin_page()` L375 hard-codes `esc_html('?')` though `total_pages` is in the progress transient. Display the real value.
-- Progress bar never reaches 100% — total is `total_pages * per_page` (L819/846/880/893), overcounting the last partial page. Use the real count on the final page.
-- No lock during resume — `run_resume_batch()` calls `run_sync_inner()` without setting `SYNC_LOCK_TRANSIENT`, and `run_sync()` releases the lock unconditionally in `finally`. A manual "Synchronizuj teraz" during a pending resume picks up existing `$progress` and runs concurrently with the cron resume. Hold/re-assert the lock across batches and bail from resume if a manual run is active.
-- Unused vars in `run_resume_batch()`: `$current_page` (L165) never read; `$pages_done`/`$per_page`/`$remaining` only feed a log line.
+### B4. MINOR — cleanups (PARTIALLY DONE)
+- **DONE:** No lock during resume → FIXED in v0.8.2: `run_resume_batch()` sets sync lock around `run_sync_inner()`, bails if manual sync active.
+- **REMAINING:** Remove dead `foreach_product()` (L636) — no longer called; `run_sync_inner()` has its own loop.
+- **REMAINING:** Progress UI shows `strona X/?` — `render_admin_page()` hard-codes `esc_html('?')` though `total_pages` is in the progress transient. Display the real value.
+- **REMAINING:** Progress bar never reaches 100% — total is `total_pages * per_page`, overcounting the last partial page. Use the real count on the final page.
+- **DONE:** Unused vars in `run_resume_batch()` cleaned up during Codex round 2 fixes.
+
+## v0.8.2 BATCH LOOP FIXES (Codex Round 2 findings)
+
+### B5. CRITICAL — infinite resume loop on empty page completion
+**Fixed in v0.8.2:** Empty-page `$count === 0` no longer saves progress (no work done). `run_resume_batch()` completion detection enhanced: if `products_processed` unchanged after resume AND we expected more pages, clear stale progress as completed.
+
+### B6. MAJOR — soft-delete never runs with batching
+**Related to B3:** When batch limit hits, `$progress` exists → soft-delete skipped forever (only cleared when all pages done and `run_sync()` clears it). With multi-batch syncs, if the catalog changes between batches or API errors mid-run, soft-delete may never execute. **Document in settings.**
+
+### B7. MAJOR — no atomic sync lock
+**Codex finding:** `get_transient()` / `set_transient()` is not atomic. Race window exists where two WP-Cron invocations can both pass the lock check and run concurrently. WordPress cron doesn't parallelize by default, but under heavy load with multiple servers, this could happen. **Fix: use `add_option()` + transients for compare-and-set behavior.**
 
 ---
 
