@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.0
+ * Version:           0.9.1
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -32,6 +32,8 @@ final class WC_Product_Sync {
 	const SYNC_PROGRESS_TRANSIENT = 'wps_sync_progress';
 	const SYNC_LAST_RESULT     = 'wps_last_sync_result'; // Cumulative result of the last run (for UI feedback)
 	const SYNC_KEYS_TRANSIENT  = 'wps_sync_source_keys'; // Accumulated source SKUs/names across batches (for soft-delete)
+	const SYNC_LAST_REPORT     = 'wps_last_sync_report'; // Per-item report of the last run (what/how/why)
+	const REPORT_BUCKET_CAP    = 500;                    // Max items stored per bucket (counts stay exact)
 
 	// Soft-delete
 	const META_SYNCED       = '_wps_synced';
@@ -59,6 +61,12 @@ final class WC_Product_Sync {
 	private $variations_fetch_error = false;
 	/** Czy pobieranie definicji atrybutów globalnych się nie powiodło (blokada, by nie zniszczyć wariantów) */
 	private $attributes_fetch_failed = false;
+	/** Bufor raportu bieżącego batcha: bucket => lista wpisów (scalany do opcji po batchu) */
+	private $run_report = array();
+	/** Jak dopasowano ostatni produkt: 'SKU' | 'source_id' | 'nazwa' | '' (nowy) */
+	private $last_match_method = '';
+	/** Powód pominięcia ostatniego produktu (dla raportu) */
+	private $last_skip_reason = '';
 	/** Ostatnie nagłówki odpowiedzi REST API (X-WP-TotalPages) */
 	private $last_api_headers = array();
 
@@ -196,6 +204,46 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 		update_option( self::SYNC_LAST_RESULT, $r, false );
 	}
 
+	/* ---- Per-run report (what was updated/how, what was skipped/why) ---- */
+
+	/** Record one item into the in-memory report buffer for the current batch. */
+	private function report_add( $bucket, array $entry ) {
+		$this->run_report[ $bucket ][] = $entry;
+	}
+
+	/** Reset the stored report at the start of a fresh run. */
+	private function reset_run_report() {
+		$this->run_report = array();
+		delete_option( self::SYNC_LAST_REPORT );
+	}
+
+	/** Merge this batch's buffered report into the persisted option (capped per bucket). */
+	private function append_run_report( $dry_run = false ) {
+		$r = get_option( self::SYNC_LAST_REPORT, array() );
+		if ( ! is_array( $r ) ) {
+			$r = array();
+		}
+		$r['dry'] = (bool) $dry_run;
+		if ( empty( $this->run_report ) ) {
+			update_option( self::SYNC_LAST_REPORT, $r, false );
+			return;
+		}
+		foreach ( $this->run_report as $bucket => $entries ) {
+			if ( ! isset( $r[ $bucket ] ) ) {
+				$r[ $bucket ] = array();
+			}
+			foreach ( $entries as $e ) {
+				if ( count( $r[ $bucket ] ) < self::REPORT_BUCKET_CAP ) {
+					$r[ $bucket ][] = $e;
+				} else {
+					$r['_truncated'] = true; // counts remain exact via SYNC_LAST_RESULT
+				}
+			}
+		}
+		update_option( self::SYNC_LAST_REPORT, $r, false );
+		$this->run_report = array();
+	}
+
 	private function clear_sync_progress() {
 		delete_transient( self::SYNC_PROGRESS_TRANSIENT );
 	}
@@ -287,7 +335,8 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			}
 		}
 
-		// Fold this batch into the cumulative result shown on the settings page.
+		// Fold this batch into the cumulative result + per-item report shown on the settings page.
+		$this->append_run_report( false );
 		$this->accumulate_run_result( $stats, $sync_complete );
 
 		if ( $sync_complete ) {
@@ -585,6 +634,8 @@ $defaults = array(
 						) )
 					);
 				}
+				// Detailed report: what was created/updated (how) and skipped (why).
+				$this->render_report_panel();
 			}
 			?>
 
@@ -708,6 +759,64 @@ $defaults = array(
 			</p>
 		</div>
 		<?php
+	}
+
+	/** Detailed per-run report: expandable sections with per-item "how"/"why". */
+	private function render_report_panel() {
+		$report = get_option( self::SYNC_LAST_REPORT, array() );
+		if ( ! is_array( $report ) || empty( $report ) ) {
+			return;
+		}
+		$buckets = array(
+			'created'      => __( 'Utworzono', 'wc-product-sync' ),
+			'updated'      => __( 'Zaktualizowano', 'wc-product-sync' ),
+			'skipped'      => __( 'Pominięto', 'wc-product-sync' ),
+			'soft_deleted' => __( 'Oznaczono jako usunięte (draft)', 'wc-product-sync' ),
+			'warnings'     => __( 'Ostrzeżenia', 'wc-product-sync' ),
+			'errors'       => __( 'Błędy', 'wc-product-sync' ),
+		);
+		$has_any = false;
+		foreach ( $buckets as $k => $l ) {
+			if ( ! empty( $report[ $k ] ) ) {
+				$has_any = true;
+				break;
+			}
+		}
+		if ( ! $has_any ) {
+			return;
+		}
+
+		echo '<h2>' . esc_html__( 'Raport ostatniej synchronizacji', 'wc-product-sync' )
+			. ( ! empty( $report['dry'] ) ? ' <em>(' . esc_html__( 'symulacja', 'wc-product-sync' ) . ')</em>' : '' ) . '</h2>';
+		if ( ! empty( $report['_truncated'] ) ) {
+			printf( '<p class="description">%s</p>', esc_html( sprintf(
+				/* translators: %d: per-bucket cap */
+				__( 'Lista skrócona do %d pozycji na kategorię — liczniki powyżej są dokładne, pełne szczegóły w logach WooCommerce.', 'wc-product-sync' ),
+				self::REPORT_BUCKET_CAP ) ) );
+		}
+
+		foreach ( $buckets as $key => $label ) {
+			if ( empty( $report[ $key ] ) ) {
+				continue;
+			}
+			$items    = $report[ $key ];
+			$last_col = in_array( $key, array( 'created', 'updated' ), true )
+				? __( 'Jak', 'wc-product-sync' ) : __( 'Powód', 'wc-product-sync' );
+			printf( '<details style="margin:6px 0;"><summary style="cursor:pointer; font-weight:600; padding:4px 0;">%s (%d)</summary>',
+				esc_html( $label ), count( $items ) );
+			echo '<table class="widefat striped" style="margin:6px 0 12px;"><thead><tr>'
+				. '<th>' . esc_html__( 'Produkt', 'wc-product-sync' ) . '</th><th>SKU</th>'
+				. '<th>' . esc_html__( 'Typ', 'wc-product-sync' ) . '</th><th>' . esc_html( $last_col ) . '</th>'
+				. '</tr></thead><tbody>';
+			foreach ( $items as $it ) {
+				printf( '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>',
+					esc_html( $it['name'] ?? '' ),
+					esc_html( $it['sku'] ?? '' ),
+					esc_html( $it['type'] ?? '' ),
+					esc_html( $it['how'] ?? ( $it['reason'] ?? '' ) ) );
+			}
+			echo '</tbody></table></details>';
+		}
 	}
 
 	public function handle_manual_run() {
@@ -927,6 +1036,7 @@ $defaults = array(
 
 		try {
 			$result = $this->run_sync_inner( $dry_run, $stats, $progress, $still_batching );
+			$this->append_run_report( $dry_run ); // persist this batch's per-item report
 			if ( ! $dry_run ) {
 				// Accumulate this batch into the cumulative result; complete when not still batching.
 				$this->accumulate_run_result( $stats, ! $still_batching );
@@ -952,9 +1062,12 @@ $defaults = array(
 		// (single-pass) soft-delete may run. A real resume has current_page>=1.
 		$is_first_batch = empty( $progress ) || (int) ( $progress['current_page'] ?? 0 ) < 1;
 
-		// Fresh run: start collecting source keys from scratch (for soft-delete across batches).
-		if ( $is_first_batch && ! $dry_run ) {
-			delete_transient( self::SYNC_KEYS_TRANSIENT );
+		// Fresh run: start collecting source keys + the per-item report from scratch.
+		if ( $is_first_batch ) {
+			$this->reset_run_report();
+			if ( ! $dry_run ) {
+				delete_transient( self::SYNC_KEYS_TRANSIENT );
+			}
 		}
 
 		// Pełna synchronizacja – usuń stare lokalne produkty. Only on the first pass.
@@ -1208,21 +1321,42 @@ $defaults = array(
 	}
 
 	private function process_single_product( array $p, $dry_run, &$stats ) {
-		if ( ! $this->should_sync_status( $p['status'] ?? 'publish' ) ) {
+		$base = array(
+			'name' => (string) ( $p['name'] ?? '?' ),
+			'sku'  => (string) ( $p['sku'] ?? '' ),
+			'type' => (string) ( $p['type'] ?? 'simple' ),
+		);
+
+		$status = $p['status'] ?? 'publish';
+		if ( ! $this->should_sync_status( $status ) ) {
 			$stats['skipped']++;
+			$reason = sprintf( "status '%s' w źródle (synchronizowane tylko 'publish')", $status );
+			$this->report_add( 'skipped', $base + array( 'reason' => $reason ) );
+			$this->log( 'info', sprintf( "Pominięto '%s' (SKU=%s): %s", $base['name'], $base['sku'], $reason ) );
 			return;
 		}
+
+		$this->last_match_method = '';
+		$this->last_skip_reason  = '';
 		try {
 			$result = $this->dispatch_upsert( $p, $dry_run );
 			if ( isset( $stats[ $result ] ) ) {
 				$stats[ $result ]++;
 			}
+			if ( 'created' === $result ) {
+				$this->report_add( 'created', $base + array( 'how' => 'nowy produkt' ) );
+			} elseif ( 'updated' === $result ) {
+				$this->report_add( 'updated', $base + array( 'how' => $this->last_match_method ? 'dopasowano po ' . $this->last_match_method : 'zaktualizowano' ) );
+			} elseif ( 'skipped' === $result ) {
+				$this->report_add( 'skipped', $base + array( 'reason' => $this->last_skip_reason ?: 'pominięto' ) );
+			}
 		} catch ( \Throwable $e ) {
 			$stats['errors']++;
+			$this->report_add( 'errors', $base + array( 'reason' => $e->getMessage() ) );
 			$this->log( 'error', sprintf(
 				"Błąd dla '%s' (SKU=%s): %s",
-				$p['name'] ?? '?',
-				$p['sku'] ?? '',
+				$base['name'],
+				$base['sku'],
 				$e->getMessage()
 			) );
 		}
@@ -1238,7 +1372,8 @@ $defaults = array(
 			case 'grouped':
 				return $this->upsert_grouped( $p, $dry_run );
 			default:
-				$this->log( 'warning', sprintf( "Pominięto '%s' – typ '%s' nieobsługiwany.", $p['name'] ?? '?', $type ) );
+				$this->last_skip_reason = sprintf( "typ '%s' nieobsługiwany", $type );
+				$this->log( 'warning', sprintf( "Pominięto '%s' – %s.", $p['name'] ?? '?', $this->last_skip_reason ) );
 				return 'skipped';
 		}
 	}
@@ -1291,10 +1426,12 @@ $defaults = array(
 	 */
 	private function find_existing_product( array $p ) {
 
+		$this->last_match_method = '';
 		$sku = $this->require_sku( $p );
 		if ( '' !== $sku ) {
 			$id = self::sku_to_id( $sku );
 			if ( $id ) {
+				$this->last_match_method = 'SKU';
 				return $id;
 			}
 		}
@@ -1304,6 +1441,7 @@ $defaults = array(
 			$src_id = absint( $p['id'] );
 			$id     = self::source_id_to_local( $src_id );
 			if ( $id ) {
+				$this->last_match_method = 'ID źródła';
 				return $id;
 			}
 		}
@@ -1327,6 +1465,7 @@ $defaults = array(
 				$existing_src = get_post_meta( $pid, self::META_SOURCE_ID, true );
 				// Dopuszczamy jeśli produkt jest nieprzypisany lub należy do tego samego źródła.
 				if ( '' === $existing_src || (string) $existing_src === (string) $src_id ) {
+					$this->last_match_method = 'nazwę';
 					return $pid;
 				}
 			}
@@ -1745,6 +1884,10 @@ $defaults = array(
 		foreach ( ( $p['grouped_products'] ?? array() ) as $child_source_id ) {
 			$child_sku = $this->source_id_to_sku[ (int) $child_source_id ] ?? '';
 			if ( ! $child_sku ) {
+				$this->report_add( 'warnings', array(
+					'name' => $p['name'] ?? '?', 'sku' => $p['sku'] ?? '', 'type' => 'grouped',
+					'reason' => sprintf( 'dziecko src_id=%d bez SKU — pominięte', (int) $child_source_id ),
+				) );
 				$this->log( 'warning', sprintf( "Grouped '%s': dziecko src_id=%d bez SKU – pomijam.", $p['name'] ?? '?', $child_source_id ) );
 				continue;
 			}
@@ -1752,6 +1895,10 @@ $defaults = array(
 			if ( $local ) {
 				$child_ids[] = $local;
 			} else {
+				$this->report_add( 'warnings', array(
+					'name' => $p['name'] ?? '?', 'sku' => $p['sku'] ?? '', 'type' => 'grouped',
+					'reason' => sprintf( 'brak lokalnego dziecka SKU=%s (jeszcze niezsynchronizowane?)', $child_sku ),
+				) );
 				$this->log( 'warning', sprintf( "Grouped '%s': brak lokalnego dziecka SKU=%s.", $p['name'] ?? '?', $child_sku ) );
 			}
 		}
@@ -1945,6 +2092,12 @@ $defaults = array(
 			$match_sku  = $product->get_sku();
 			$match_key  = ( '' !== $match_sku ) ? $match_sku : $product->get_name();
 
+			$this->report_add( 'soft_deleted', array(
+				'name'   => $product->get_name(),
+				'sku'    => $match_sku,
+				'type'   => $product->get_type(),
+				'reason' => 'brak w źródle' . ( $dry_run ? ' [DRY]' : '' ),
+			) );
 			if ( $dry_run ) {
 				$this->log( 'info', sprintf( '[DRY] SOFT-DELETE → draft: %s (ID=%d, klucz=%s)', $product->get_name(), $pid, $match_key ) );
 				continue;

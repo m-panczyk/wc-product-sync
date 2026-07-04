@@ -1,6 +1,21 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.9.0** (1.0-candidate: soft-delete under batching, cron-health fallback, N1/N6)
+Current version: **0.9.1** (per-run report: what/how + skipped/why) — next tagged release = 1.0
+
+## v0.9.1 — per-run report (2026-07-04)
+Owner request: "after update, report what was updated and how, what was skipped and why."
+- New per-item report accumulated across batches in option `wps_last_sync_report`
+  (buckets: created/updated/skipped/soft_deleted/warnings/errors; capped `REPORT_BUCKET_CAP`=500/bucket,
+  counts stay exact via `wps_last_sync_result`).
+- Recorded in `process_single_product` (created/updated + `how` = matched by SKU/ID źródła/nazwę via
+  `find_existing_product`; skipped + `why`; errors + message), `dispatch_upsert` (unsupported type),
+  `soft_delete_missing` (drafted = brak w źródle), `upsert_grouped` (missing-child warnings).
+- Fills the gap where non-published skips were silently counted — now logged AND reported with reason.
+- UI: expandable `<details>` sections with per-item table on the settings page when idle
+  (`render_report_panel()`), plus a `(symulacja)` marker for dry runs.
+- **Verified:** dry run → updated 469 (how=SKU), skipped 23 (why=status 'pending'); panel renders.
+
+
 
 ## v0.9.0 — 1.0-readiness fixes (2026-07-04)
 
