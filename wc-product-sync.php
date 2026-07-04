@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.8.4
+ * Version:           0.9.0
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -31,6 +31,7 @@ final class WC_Product_Sync {
 	const SYNC_LOCK_TRANSIENT  = 'wps_sync_running';
 	const SYNC_PROGRESS_TRANSIENT = 'wps_sync_progress';
 	const SYNC_LAST_RESULT     = 'wps_last_sync_result'; // Cumulative result of the last run (for UI feedback)
+	const SYNC_KEYS_TRANSIENT  = 'wps_sync_source_keys'; // Accumulated source SKUs/names across batches (for soft-delete)
 
 	// Soft-delete
 	const META_SYNCED       = '_wps_synced';
@@ -56,6 +57,8 @@ final class WC_Product_Sync {
 	private $fetch_had_error = false;
 	/** Czy pobieranie wariacji napotkało błąd (blokada usunięć) */
 	private $variations_fetch_error = false;
+	/** Czy pobieranie definicji atrybutów globalnych się nie powiodło (blokada, by nie zniszczyć wariantów) */
+	private $attributes_fetch_failed = false;
 	/** Ostatnie nagłówki odpowiedzi REST API (X-WP-TotalPages) */
 	private $last_api_headers = array();
 
@@ -71,6 +74,7 @@ final class WC_Product_Sync {
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 		add_action( 'admin_post_wc_product_sync_run', array( $this, 'handle_manual_run' ) );
 		add_action( 'admin_post_wc_product_sync_cancel', array( $this, 'handle_cancel_sync' ) );
+		add_action( 'admin_post_wc_product_sync_step', array( $this, 'handle_step_sync' ) );
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
 		add_action( self::RESUME_HOOK, array( $this, 'run_resume_batch' ) );
 		add_action( 'admin_notices', array( $this, 'maybe_wc_missing_notice' ) );
@@ -142,6 +146,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			'total_items'      => $this->last_total_items, // Exact count for accurate progress %
 			'per_page'         => $this->cfg_per_page(),    // Store per_page for resume
 			'started_at'       => $started_at,
+			'updated_at'       => time(),                   // Heartbeat — used to detect a stalled/no-cron sync
 		), 3600 ); // Persist for 1 hour (enough for all batches to finish)
 	}
 
@@ -161,6 +166,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			'total_items'        => 0,
 			'per_page'           => $this->cfg_per_page(),
 			'started_at'         => time(),
+			'updated_at'         => time(),
 		), 3600 );
 	}
 
@@ -197,8 +203,34 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 	private function cancel_sync() {
 		delete_transient( self::SYNC_LOCK_TRANSIENT );
 		$this->clear_sync_progress();
+		delete_transient( self::SYNC_KEYS_TRANSIENT );
 		wp_clear_scheduled_hook( self::RESUME_HOOK );
+		// Un-stick the result tracker so the UI doesn't keep showing "running".
+		$r = get_option( self::SYNC_LAST_RESULT, array() );
+		if ( is_array( $r ) && ! empty( $r['running'] ) ) {
+			$r['running']     = false;
+			$r['finished_at'] = time();
+			update_option( self::SYNC_LAST_RESULT, $r, false );
+		}
 		$this->log( 'info', 'Synchronizacja anulowana przez użytkownika.' );
+	}
+
+	/** Accumulate the source keys (SKUs/names) seen this batch so soft-delete on the FINAL
+	 *  batch can compare against the WHOLE catalog, not just one batch. Also records the total
+	 *  count and whether any fetch failed (which makes the collected set unsafe for deletion). */
+	private function accumulate_source_keys( array $keys, $count, $had_error ) {
+		$c = get_transient( self::SYNC_KEYS_TRANSIENT );
+		if ( ! is_array( $c ) ) {
+			$c = array( 'keys' => array(), 'count' => 0, 'had_error' => false );
+		}
+		foreach ( $keys as $k ) {
+			if ( '' !== $k ) {
+				$c['keys'][ $k ] = true; // assoc = dedup across batches (pages may be re-fetched on resume)
+			}
+		}
+		$c['count']    += (int) $count;
+		$c['had_error'] = $c['had_error'] || (bool) $had_error;
+		set_transient( self::SYNC_KEYS_TRANSIENT, $c, 3600 );
 	}
 
 	/** Resume batch: called by WP-Cron to continue sync from saved progress. */
@@ -333,6 +365,25 @@ $defaults = array(
 		return $this->cfg_source_url() && $this->cfg_ck() && $this->cfg_cs();
 	}
 
+	/** N1: HTTP source on a public host leaks the Basic-auth API keys in cleartext.
+	 *  Returns true when the URL is http:// AND the host is not local/private. */
+	private function source_url_is_insecure( $url ) {
+		$url = trim( (string) $url );
+		if ( '' === $url || 0 === stripos( $url, 'https://' ) ) {
+			return false;
+		}
+		$host = wp_parse_url( $url, PHP_URL_HOST );
+		if ( ! $host ) {
+			return false;
+		}
+		if ( in_array( strtolower( $host ), array( 'localhost', '127.0.0.1', '::1' ), true )
+			|| preg_match( '/\.(local|test|localhost)$/i', $host )
+			|| preg_match( '/^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/', $host ) ) {
+			return false; // local/private lab host — http is acceptable
+		}
+		return true;
+	}
+
 	/* =====================================================================
 	 *  Ustawienia (Settings API)
 	 * ================================================================== */
@@ -345,6 +396,11 @@ $defaults = array(
 		$out = $this->get_options();
 		if ( isset( $input['source_url'] ) ) {
 			$out['source_url']       = esc_url_raw( trim( $input['source_url'] ) );
+			if ( $this->source_url_is_insecure( $out['source_url'] ) ) {
+				add_settings_error( self::OPTION_KEY, 'wps_insecure_url',
+					__( 'Uwaga: URL źródła używa HTTP — klucze API są przesyłane jawnie. Użyj HTTPS.', 'wc-product-sync' ),
+					'warning' );
+			}
 		}
 		if ( isset( $input['consumer_key'] ) ) {
 			$out['consumer_key']     = sanitize_text_field( trim( $input['consumer_key'] ) );
@@ -434,6 +490,12 @@ $defaults = array(
 			// "Starting" state: seeded transient before the first page has been fetched.
 			$is_starting = ( 0 === (int) $page && 0 === (int) $processed );
 
+			// Stall/no-cron detection: a batch holds the lock while it runs, so if no batch is
+			// active AND there's been no heartbeat for a while, WP-Cron probably isn't firing.
+			$active        = ( false !== get_transient( self::SYNC_LOCK_TRANSIENT ) );
+			$last_update   = isset( $progress['updated_at'] ) ? (int) $progress['updated_at'] : $start_time;
+			$maybe_stalled = ! $active && ( time() - $last_update ) > 150;
+
 			echo '<div class="notice notice-info" style="padding:15px; margin-bottom:20px;">';
 			echo '<h3 style="margin:0 0 10px;">' . esc_html__( 'Synchronizacja w toku', 'wc-product-sync' ) . '</h3>';
 			if ( $is_starting ) {
@@ -452,10 +514,20 @@ $defaults = array(
 				echo '</p>';
 			}
 
-			// Auto-batch info — no manual continue needed anymore
+			// Auto-batch info — no manual continue needed when WP-Cron works.
 			echo '<p class="description" style="margin:8px 0 0;">';
 			echo esc_html__( 'Synchronizacja jest automatycznie kontynuowana batch po batchu przez WP-Cron. Strona odświeża się sama; może być zamknięta.', 'wc-product-sync' );
 			echo '</p>';
+
+			// Recovery path when WP-Cron isn't firing (the sync would otherwise sit here forever).
+			if ( $maybe_stalled ) {
+				echo '<p style="color:#b32d2e; margin:10px 0 4px;"><strong>'
+					. esc_html__( 'Uwaga: brak postępu od ponad 2 minut — WP-Cron może nie być uruchomiony, więc synchronizacja mogła się nie rozpocząć/zatrzymać.', 'wc-product-sync' )
+					. '</strong></p>';
+				printf( '<p><a href="%s" class="button button-primary">%s</a></p>',
+					esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_step' ), self::NONCE_ACTION . '_step' ) ),
+					esc_html__( 'Kontynuuj teraz ręcznie (bez WP-Cron)', 'wc-product-sync' ) );
+			}
 
 			printf( '<p><a href="%s" class="button button-link-danger" onclick="return confirm(\'Anulować synchronizację?\');">Anuluj</a>',
 				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_cancel' ), self::NONCE_ACTION . '_cancel' ) );
@@ -485,6 +557,10 @@ $defaults = array(
 			<?php elseif ( isset( $_GET['started'] ) ) : ?>
 				<div class="notice notice-info is-dismissible"><p>
 					<?php esc_html_e( 'Synchronizacja uruchomiona w tle. Postęp pojawi się poniżej i będzie się odświeżał automatycznie.', 'wc-product-sync' ); ?>
+				</p></div>
+			<?php elseif ( isset( $_GET['stepped'] ) ) : ?>
+				<div class="notice notice-info is-dismissible"><p>
+					<?php esc_html_e( 'Wykonano batch ręcznie. Jeśli pozostały produkty, kliknij ponownie „Kontynuuj teraz" lub napraw WP-Cron.', 'wc-product-sync' ); ?>
 				</p></div>
 			<?php elseif ( isset( $_GET['cancelled'] ) ) : ?>
 				<div class="notice notice-warning is-dismissible"><p>
@@ -687,6 +763,31 @@ $defaults = array(
 		exit;
 	}
 
+	/** Fallback when WP-Cron isn't firing: run the pending batch synchronously in this request.
+	 *  Blocks for one batch (user-initiated), then redirects back to watch/continue. */
+	public function handle_step_sync() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( esc_html__( 'Brak uprawnień.', 'wc-product-sync' ) );
+		}
+		check_admin_referer( self::NONCE_ACTION . '_step' );
+		if ( function_exists( 'ignore_user_abort' ) ) {
+			@ignore_user_abort( true );
+		}
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 900 );
+		}
+		$progress = $this->get_sync_progress();
+		if ( $progress ) {
+			if ( (int) ( $progress['current_page'] ?? 0 ) < 1 ) {
+				$this->run_sync_cron();      // still the "starting" seed → run the first batch
+			} else {
+				$this->run_resume_batch();   // continue from where cron left off
+			}
+		}
+		wp_safe_redirect( admin_url( 'admin.php?page=wc-product-sync&stepped=1' ) );
+		exit;
+	}
+
 	public function run_sync_cron() {
 		$this->run_sync( false );
 	}
@@ -749,8 +850,12 @@ $defaults = array(
 
 	private function fetch_source_attributes() {
 		$out  = array();
+		$this->attributes_fetch_failed = false;
 		$list = $this->api_get( '/wp-json/wc/v3/products/attributes', array( 'per_page' => 100 ) );
 		if ( is_wp_error( $list ) ) {
+			// Signal failure: without the global-attribute map, variable products would be
+			// rebuilt with NO attributes (map lookup → null → skipped), silently wiping them.
+			$this->attributes_fetch_failed = true;
 			$this->log( 'warning', 'Nie pobrano definicji atrybutów: ' . $list->get_error_message() );
 			return $out;
 		}
@@ -847,6 +952,11 @@ $defaults = array(
 		// (single-pass) soft-delete may run. A real resume has current_page>=1.
 		$is_first_batch = empty( $progress ) || (int) ( $progress['current_page'] ?? 0 ) < 1;
 
+		// Fresh run: start collecting source keys from scratch (for soft-delete across batches).
+		if ( $is_first_batch && ! $dry_run ) {
+			delete_transient( self::SYNC_KEYS_TRANSIENT );
+		}
+
 		// Pełna synchronizacja – usuń stare lokalne produkty. Only on the first pass.
 		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && $is_first_batch;
 		if ( $force_full && ! $dry_run ) {
@@ -893,6 +1003,18 @@ $defaults = array(
 		}
 
 		$this->source_attributes = $this->fetch_source_attributes();
+
+		// N6: if the global-attribute map couldn't be fetched, abort BEFORE touching any product.
+		// Rebuilding variable products without it would silently strip all their attributes, and
+		// soft-delete on a partial view could wrongly draft valid products. Retry on the next run.
+		if ( $this->attributes_fetch_failed ) {
+			$this->fetch_had_error = true;
+			$this->log( 'error', 'Nie pobrano definicji atrybutów globalnych ze źródła — przerywam ten przebieg bez zmian w produktach. Zostanie ponowiony.' );
+			if ( ! empty( $progress ) ) {
+				$still_batching = true; // resumed run: keep progress so the resume retries
+			}
+			return $stats;
+		}
 
 		$total_counted    = 0;
 		$source_keys      = array();
@@ -1011,6 +1133,13 @@ $defaults = array(
 			$this->process_single_product( $p, $dry_run, $stats );
 		}
 
+		// Record this batch's source keys so soft-delete on the final batch sees the whole
+		// catalog. Persist for real runs before any early return below (dry runs are single-pass
+		// and use the in-memory keys directly). $fetch_had_error marks the collected set unsafe.
+		if ( ! $dry_run && ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
+			$this->accumulate_source_keys( $source_keys, $total_counted, $fetch_had_error );
+		}
+
 		// Stopped at the batch limit — progress preserved, resume already scheduled.
 		if ( $hit_batch_limit ) {
 			$this->log( 'info', 'Limit batchu osiągnięty — pozostawiam postęp do kontynuacji.' );
@@ -1047,12 +1176,22 @@ $defaults = array(
 
 		if ( function_exists( 'gc_collect_cycles' ) ) gc_collect_cycles();
 
-		// Soft-delete check (only if this run saw the FULL source in one pass).
-		// On resumed/batched syncs $source_keys only covers the last batch, so skip to avoid
-		// marking valid synced products as missing. Reaching here on the first batch means the
-		// whole catalog fit in this pass (no batch-limit early-return), so source_keys is complete.
-		if ( $is_first_batch && ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
-			$this->soft_delete_missing( array_unique( $source_keys ), $total_counted, $dry_run );
+		// Soft-delete: we only reach here when the sync is COMPLETE (all pages processed across
+		// however many batches). Compare the full catalog view against local synced products.
+		// Dry runs are single-pass → use in-memory keys. Real runs → use the keys accumulated
+		// across every batch (skipped if any batch had a fetch error, i.e. an incomplete view).
+		if ( ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
+			if ( $dry_run ) {
+				$this->soft_delete_missing( array_unique( $source_keys ), $total_counted, true );
+			} else {
+				$collected = get_transient( self::SYNC_KEYS_TRANSIENT );
+				if ( is_array( $collected ) && empty( $collected['had_error'] ) && ! empty( $collected['keys'] ) ) {
+					$this->soft_delete_missing( array_keys( $collected['keys'] ), (int) $collected['count'], false );
+				} else {
+					$this->log( 'warning', 'Soft-delete pominięty: niekompletny widok źródła (błąd pobierania w którymś batchu) lub brak danych.' );
+				}
+				delete_transient( self::SYNC_KEYS_TRANSIENT );
+			}
 		}
 
 		// Final progress update for completed sync

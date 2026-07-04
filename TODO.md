@@ -1,6 +1,39 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.8.4** (background manual run + live progress UI; 0.8.3 render crash hotfix)
+Current version: **0.9.0** (1.0-candidate: soft-delete under batching, cron-health fallback, N1/N6)
+
+## v0.9.0 — 1.0-readiness fixes (2026-07-04)
+
+Implemented after the 1.0 review; all verified on the docker WP+WC bed.
+
+### #1 BLOCKER — soft-delete silently disabled under batching — **FIXED**
+Defaults (`per_page=100`, `batch_limit=200`) mean any catalog >200 runs batched, and the old guard
+(`$is_first_batch`) meant soft-delete never ran. Now source keys (SKU/name) are **accumulated across
+all batches** in transient `wps_sync_source_keys` (+count, +had_error), and soft-delete runs on the
+FINAL batch against the whole-catalog view. Skipped if any batch had a fetch error (incomplete view).
+Dry runs stay single-pass (in-memory keys). **Verified:** keys 99→199→469 across batches; a true
+orphan was drafted+tagged while an early-batch product survived; transient cleared after.
+NOTE: grouped-child resolution across batches (B3 remainder) is still open — separate from soft-delete.
+
+### #2 BLOCKER — manual run silently does nothing if WP-Cron doesn't fire — **FIXED**
+Added an `updated_at` heartbeat to the progress transient and a stall detector in the UI: if no batch
+holds the sync lock AND there's been no heartbeat for >150s, show a warning + a "Kontynuuj teraz
+ręcznie (bez WP-Cron)" button (new `admin_post_wc_product_sync_step` → runs one batch synchronously).
+`cancel_sync()` now also un-sticks the `running` result flag. **Verified:** warning shows only when
+stalled; suppressed when fresh or while a batch holds the lock.
+
+### N6 — attribute-fetch failure could wipe variable-product attributes — **FIXED**
+`fetch_source_attributes()` now sets `$attributes_fetch_failed`; `run_sync_inner()` aborts the run
+BEFORE touching any product (sets `fetch_had_error`, retries on resume) instead of rebuilding variable
+products with no attributes.
+
+### N1 — HTTP source URL leaks API keys — **FIXED**
+`source_url_is_insecure()` flags http:// on public hosts (allows localhost/RFC1918/.local/.test);
+`sanitize_options()` shows a settings warning. **Verified** against 5 URL cases.
+
+**Remaining for a full 1.0:** grouped children across batches (B3), cancel mid-batch doesn't stop an
+in-flight batch, B7 atomic lock, images-on-update, N3/N5/N7/N9/N12, PHPCS-WP pass, `readme.txt`.
+Docker test-bed WP-Cron loopback was fixed separately via a wpcron sidecar (see wp-docker-test repo).
 Target file: `wc-product-sync.php` (single-file WordPress plugin).
 
 General rules for the agent:
