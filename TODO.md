@@ -1,6 +1,18 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.9.4** — next tagged release = 1.0
+Current version: **0.9.5** — next tagged release = 1.0
+
+## v0.9.5 — merge soft-delete toggle into a single deletion-mode selector
+Owner: skoro jest tryb usuwania, osobny checkbox soft-delete jest zbędny.
+- Removed the `soft_delete_enabled` checkbox. `deletion_mode` now has THREE values:
+  `none` (default — leave removed products), `soft` (draft+tag), `hard` (permanent).
+- New helper `deletion_enabled()` gates both the key-accumulation and the deletion step.
+- Backward-compat migration in `get_options()`: a pre-0.9.5 row with `soft_delete_enabled=1`
+  and no `deletion_mode` is mapped to `soft` (else `none`).
+- UI: one radio group "Produkty usunięte ze źródła" (Nie ruszaj / Szkic+tag / Usuń trwale).
+- **Verified:** migration (1→soft, 0→none), sanitize (bogus→none), deletion_enabled per mode,
+  UI shows 3 radios and no old checkbox.
+
 
 ## v0.9.4 — hard-delete mode
 Owner request: opcja trwałego usuwania produktów, których nie ma w źródle (zamiast szkic+tag).

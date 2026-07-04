@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.4
+ * Version:           0.9.5
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -376,8 +376,7 @@ $defaults = array(
 		'per_page'            => 100,
 		'sync_batch_limit'    => 200, // 0 = no limit (legacy), recommended: 200-500 products
 		'schedule_enabled'    => 0,
-		'soft_delete_enabled' => 0,
-		'deletion_mode'       => 'soft',  // 'soft' = szkic+tag; 'hard' = trwałe usunięcie
+		'deletion_mode'       => 'none',  // 'none' = nie ruszaj; 'soft' = szkic+tag; 'hard' = trwałe usunięcie
 		'soft_delete_limit'   => 50,
 		'hard_delete_max'     => 50,       // bezpiecznik: maks. trwałych usunięć na przebieg (0 = bez limitu)
 		'cron_hour'           => 3,
@@ -388,7 +387,13 @@ $defaults = array(
 		'sync_statuses'       => array( 'publish' ),
 		'sync_fields'         => array( 'description', 'price', 'stock', 'images', 'categories', 'attributes', 'dimensions' ),
 	);
-		$opts = wp_parse_args( get_option( self::OPTION_KEY, array() ), $defaults );
+		$raw = get_option( self::OPTION_KEY, array() );
+		// Migration: pre-0.9.5 used a separate soft_delete_enabled checkbox. Map it onto
+		// deletion_mode so upgrades keep behaving the same.
+		if ( is_array( $raw ) && ! isset( $raw['deletion_mode'] ) && ! empty( $raw['soft_delete_enabled'] ) ) {
+			$raw['deletion_mode'] = 'soft';
+		}
+		$opts = wp_parse_args( $raw, $defaults );
 		// Ensure the array-typed options are always arrays (older saved rows may lack them).
 		foreach ( array( 'sync_types', 'sync_statuses', 'sync_fields' ) as $ak ) {
 			if ( ! is_array( $opts[ $ak ] ) ) {
@@ -436,6 +441,11 @@ $defaults = array(
 	 *  never touched on create or update, so local edits to it are preserved. */
 	private function field_on( $field ) {
 		return in_array( $field, (array) $this->get_options()['sync_fields'], true );
+	}
+
+	/** Should products missing from the source be handled at all? ('none' = leave them). */
+	private function deletion_enabled() {
+		return 'none' !== ( $this->get_options()['deletion_mode'] ?? 'none' );
 	}
 
 	/** N1: HTTP source on a public host leaks the Basic-auth API keys in cleartext.
@@ -490,12 +500,12 @@ $defaults = array(
 		// Checkboxes: an unchecked box is absent from $input, so these must be set
 		// unconditionally (no isset guard) — otherwise they can never be turned OFF.
 		$out['schedule_enabled']    = empty( $input['schedule_enabled'] ) ? 0 : 1;
-		$out['soft_delete_enabled'] = empty( $input['soft_delete_enabled'] ) ? 0 : 1;
 		$out['force_full_sync']     = empty( $input['force_full_sync'] ) ? 0 : 1;
 		if ( isset( $input['soft_delete_limit'] ) ) {
 			$out['soft_delete_limit']   = max( 0, (int) $input['soft_delete_limit'] );
 		}
-		$out['deletion_mode']   = ( isset( $input['deletion_mode'] ) && 'hard' === $input['deletion_mode'] ) ? 'hard' : 'soft';
+		$dm = isset( $input['deletion_mode'] ) ? $input['deletion_mode'] : 'none';
+		$out['deletion_mode']   = in_array( $dm, array( 'none', 'soft', 'hard' ), true ) ? $dm : 'none';
 		if ( isset( $input['hard_delete_max'] ) ) {
 			$out['hard_delete_max'] = max( 0, (int) $input['hard_delete_max'] );
 		}
@@ -805,29 +815,24 @@ $defaults = array(
 						</td>
 					</tr>
 					<tr>
-						<th scope="row"><?php esc_html_e( 'Soft-delete', 'wc-product-sync' ); ?></th>
+						<th scope="row"><?php esc_html_e( 'Produkty usunięte ze źródła', 'wc-product-sync' ); ?></th>
 						<td>
-							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[soft_delete_enabled]" value="1"
-								<?php checked( ! empty( $opts['soft_delete_enabled'] ) ); ?> /> <?php esc_html_e( 'Obsługuj produkty usunięte ze źródła (sposób wybierasz w „Tryb usuwania" poniżej)', 'wc-product-sync' ); ?></label>
+							<?php $wps_dm = $opts['deletion_mode'] ?? 'none'; ?>
+							<label style="display:block; margin-bottom:4px;"><input type="radio" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[deletion_mode]" value="none"
+								<?php checked( $wps_dm, 'none' ); ?> /> <?php esc_html_e( 'Nie ruszaj (pozostają opublikowane)', 'wc-product-sync' ); ?></label>
+							<label style="display:block; margin-bottom:4px;"><input type="radio" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[deletion_mode]" value="soft"
+								<?php checked( $wps_dm, 'soft' ); ?> /> <?php esc_html_e( 'Ustaw jako szkic + tag (bezpieczne, odwracalne)', 'wc-product-sync' ); ?></label>
+							<label style="display:block;"><input type="radio" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[deletion_mode]" value="hard"
+								<?php checked( $wps_dm, 'hard' ); ?> /> <strong style="color:#b32d2e;"><?php esc_html_e( 'Usuń trwale — NIEODWRACALNE', 'wc-product-sync' ); ?></strong></label>
 							<p class="description">
 								<?php
 								printf(
-									esc_html__( 'Dotyczy tylko produktów synchronizowanych przez ten plugin (znacznik %1$s). Tag: „%2$s".', 'wc-product-sync' ),
+									esc_html__( 'Co zrobić z produktami, których nie ma już w źródle. Dotyczy tylko produktów synchronizowanych przez ten plugin (znacznik %1$s). „Szkic" oznacza je tagiem „%2$s"; „Usuń trwale" kasuje na stałe (z pominięciem kosza).', 'wc-product-sync' ),
 									'<code>' . esc_html( self::META_SYNCED ) . '</code>',
 									esc_html( self::TAG_NAME )
 								);
 								?>
 							</p>
-						</td>
-					</tr>
-					<tr>
-						<th scope="row"><?php esc_html_e( 'Tryb usuwania', 'wc-product-sync' ); ?></th>
-						<td>
-							<label style="display:block; margin-bottom:4px;"><input type="radio" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[deletion_mode]" value="soft"
-								<?php checked( ( $opts['deletion_mode'] ?? 'soft' ), 'soft' ); ?> /> <?php esc_html_e( 'Szkic + tag (bezpieczne, odwracalne)', 'wc-product-sync' ); ?></label>
-							<label style="display:block;"><input type="radio" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[deletion_mode]" value="hard"
-								<?php checked( ( $opts['deletion_mode'] ?? 'soft' ), 'hard' ); ?> /> <strong style="color:#b32d2e;"><?php esc_html_e( 'Trwałe usunięcie — NIEODWRACALNE', 'wc-product-sync' ); ?></strong></label>
-							<p class="description"><?php esc_html_e( 'Co zrobić z produktami, których nie ma już w źródle. „Trwałe usunięcie" kasuje je na stałe (z pominięciem kosza). Działa tylko na produkty synchronizowane przez ten plugin.', 'wc-product-sync' ); ?></p>
 						</td>
 					</tr>
 					<tr>
@@ -1358,7 +1363,7 @@ $defaults = array(
 		// Record this batch's source keys so soft-delete on the final batch sees the whole
 		// catalog. Persist for real runs before any early return below (dry runs are single-pass
 		// and use the in-memory keys directly). $fetch_had_error marks the collected set unsafe.
-		if ( ! $dry_run && ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
+		if ( ! $dry_run && $this->deletion_enabled() ) {
 			$this->accumulate_source_keys( $source_keys, $total_counted, $fetch_had_error );
 		}
 
@@ -1398,11 +1403,12 @@ $defaults = array(
 
 		if ( function_exists( 'gc_collect_cycles' ) ) gc_collect_cycles();
 
-		// Soft-delete: we only reach here when the sync is COMPLETE (all pages processed across
-		// however many batches). Compare the full catalog view against local synced products.
-		// Dry runs are single-pass → use in-memory keys. Real runs → use the keys accumulated
-		// across every batch (skipped if any batch had a fetch error, i.e. an incomplete view).
-		if ( ! empty( $this->get_options()['soft_delete_enabled'] ) ) {
+		// Handle products removed from source (soft/hard per deletion_mode). We only reach here
+		// when the sync is COMPLETE (all pages processed across however many batches). Compare the
+		// full catalog view against local synced products. Dry runs are single-pass → use in-memory
+		// keys. Real runs → use the keys accumulated across every batch (skipped if any batch had a
+		// fetch error, i.e. an incomplete view).
+		if ( $this->deletion_enabled() ) {
 			if ( $dry_run ) {
 				$this->soft_delete_missing( array_unique( $source_keys ), $total_counted, true );
 			} else {
