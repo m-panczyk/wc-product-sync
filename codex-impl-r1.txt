@@ -1,8 +1,33 @@
+warning: `--full-auto` is deprecated; use `--sandbox workspace-write` instead.
+Reading additional input from stdin...
+OpenAI Codex v0.142.5
+--------
+workdir: /home/seth/Projekty/wpwc-prod-sync
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: none
+reasoning summaries: none
+session id: 019f3381-9c22-7732-b2a1-d3581d7534e9
+--------
+user
+Fix the SQL query on line 1241 of wc-product-sync.php. The current code uses string concatenation instead of $wpdb->prepare():
+
+Current (line ~1241):
+
+
+Replace with:
+
+
+Keep all surrounding code and comments the same. Only change the SQL query line to use $wpdb->prepare().
+
+<stdin>
 <?php
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.13
+ * Version:           0.9.11
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -89,16 +114,10 @@ final class WC_Product_Sync {
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
 		add_action( self::RESUME_HOOK, array( $this, 'run_resume_batch' ) );
 		add_action( 'admin_notices', array( $this, 'maybe_wc_missing_notice' ) );
-		add_action( 'init', array( $this, 'load_textdomain' ) );
 		// Allow image sideloading from the configured source host even if it's a private/LAN
 		// IP: WP's SSRF guard (wp_http_validate_url) otherwise blocks download_url() for
 		// RFC1918 hosts, so products would sync without images against a LAN/staging source.
 		add_filter( 'http_request_host_is_external', array( $this, 'allow_source_host' ), 10, 2 );
-	}
-
-	/** Load the plugin's translations from /languages. */
-	public static function load_textdomain() {
-		load_plugin_textdomain( 'wc-product-sync', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' );
 	}
 
 	/** Treat the admin-configured source host as external so its images can be sideloaded. */
@@ -300,13 +319,6 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 				$c['keys'][ $k ] = true; // assoc = dedup across batches (pages may be re-fetched on resume)
 			}
 		}
-		// Cap key count to prevent transient overflow on large catalogs.
-		$cap = self::REPORT_BUCKET_CAP * 40; // 20000 keys (~400KB max serialized)
-		if ( count( $c['keys'] ) > $cap ) {
-			$before = count( $c['keys'] );
-			$c['keys'] = array_flip( array_slice( array_keys( $c['keys'] ), 0, $cap ) );
-			$this->log( 'warning', sprintf( 'Source keys cap reached (%d→%d).', $before, $cap ) );
-		}
 		$c['count']    += (int) $count;
 		$c['had_error'] = $c['had_error'] || (bool) $had_error;
 		set_transient( self::SYNC_KEYS_TRANSIENT, $c, 3600 );
@@ -333,8 +345,8 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 		if ( function_exists( 'ignore_user_abort' ) ) {
 			@ignore_user_abort( true );
 		}
-		if ( function_exists( 'set_time_limit' ) && ! @set_time_limit( 900 ) ) {
-			$this->log( 'warning', 'set_time_limit(900) failed — sync may hit PHP timeout.' );
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 900 );
 		}
 
 		$total = $progress['total_products'];
@@ -1050,8 +1062,8 @@ $defaults = array(
 		if ( function_exists( 'ignore_user_abort' ) ) {
 			@ignore_user_abort( true );
 		}
-		if ( function_exists( 'set_time_limit' ) && ! @set_time_limit( 900 ) ) {
-			$this->log( 'warning', 'set_time_limit(900) failed — sync may hit PHP timeout.' );
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 900 );
 		}
 		$progress = $this->get_sync_progress();
 		if ( $progress ) {
@@ -1195,8 +1207,8 @@ $defaults = array(
 			$this->log( 'info', sprintf( 'Wznowienie z %d/%d produktów, strona %d', $progress['products_processed'], $progress['total_products'], $progress['current_page'] ) );
 		}
 
-		if ( function_exists( 'set_time_limit' ) && ! @set_time_limit( 900 ) ) {
-			$this->log( 'warning', 'set_time_limit(900) failed — sync may hit PHP timeout.' );
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 900 );
 		}
 
 		set_transient( self::SYNC_LOCK_TRANSIENT, time(), 1800 );
@@ -1251,7 +1263,7 @@ $defaults = array(
 		if ( $force_full && ! $dry_run ) {
 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
 			global $wpdb;
-			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
+			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
 			$ids = array_unique( array_map( 'absint', $ids ) );
 			if ( ! empty( $ids ) ) {
 				foreach ( $ids as $pid ) {
@@ -1729,20 +1741,6 @@ $defaults = array(
 	private function ensure_product_type( $existing_id, $wanted_class, $wanted_term ) {
 		$product = $existing_id ? wc_get_product( $existing_id ) : null;
 		if ( $product && ! is_a( $product, $wanted_class ) ) {
-			// Type is changing. If the product WAS variable and the new type is not, its
-			// variation child posts would be left orphaned in the DB (wp_posts rows with no
-			// parent product-type). Delete them before switching type.
-			if ( 'variable' !== $wanted_term && $product->is_type( 'variable' ) ) {
-				foreach ( $product->get_children() as $vid ) {
-					$child = wc_get_product( $vid );
-					if ( $child ) {
-						$child->delete( true );
-					} else {
-						wp_delete_post( $vid, true );
-					}
-					$this->log( 'info', sprintf( 'Usunięto osieroconą wariację ID=%d (zmiana typu produktu %d → %s)', $vid, (int) $existing_id, $wanted_term ) );
-				}
-			}
 			wp_set_object_terms( $existing_id, $wanted_term, 'product_type' );
 			$product = new $wanted_class( $existing_id );
 		}
@@ -1795,9 +1793,7 @@ $defaults = array(
 		// price/stock changes and added/removed variations in the source are reflected.
 		if ( 'WC_Product_Variable' === $wanted_class ) {
 			$this->sync_variations( $id, (int) $p['id'] );
-			// WC_Product_Variable::sync() called in create_new_product() only — 
-			// on UPDATE the individual variation updates from sync_variations() 
-			// are sufficient (min/max prices, term cache already correct).
+			WC_Product_Variable::sync( $id );
 		}
 		$this->mark_synced( $id );
 		$this->log( 'info', sprintf( 'Zaktualizowano %s: %s (ID=%d)', $wanted_term, $p['name'], $id ) );
@@ -2076,17 +2072,8 @@ $defaults = array(
 				if ( ! $map ) {
 					continue;
 				}
-				$option = $a['option'] ?? '';
-				$term   = get_term_by( 'name', $option, $map['taxonomy'] );
-				if ( ( ! $term || is_wp_error( $term ) ) && '' !== trim( (string) $option ) ) {
-					// Term not found on target — create it via ensure_term() so the slug we
-					// store actually points at a real term. The old fallback emitted a bare
-					// sanitize_title() slug (Żółty → zolty) without creating the term, leaving
-					// a dangling reference that silently dropped the variation's attribute value.
-					$tid  = $this->ensure_term( $map['taxonomy'], $option );
-					$term = $tid ? get_term( $tid, $map['taxonomy'] ) : null;
-				}
-				$out[ $map['taxonomy'] ] = ( $term && ! is_wp_error( $term ) ) ? $term->slug : sanitize_title( $option );
+				$term = get_term_by( 'name', $a['option'] ?? '', $map['taxonomy'] );
+				$out[ $map['taxonomy'] ] = $term ? $term->slug : sanitize_title( $a['option'] ?? '' );
 			} else {
 				$out[ sanitize_title( $a['name'] ?? '' ) ] = $a['option'] ?? '';
 			}
@@ -2523,27 +2510,178 @@ $defaults = array(
 			wc_get_logger()->log( $level, $message, array( 'source' => self::LOG_SOURCE ) );
 		}
 	}
-
-	/** Uninstall cleanup. Removes plugin OPTIONS, scheduled cron events, and transients only.
-	 *  Product meta ({@see META_SYNCED}, {@see META_SOURCE_ID}, image maps) and the soft-delete
-	 *  tag are intentionally LEFT INTACT: deleting them would destroy synced product data that
-	 *  the store still relies on. Must be static — register_uninstall_hook cannot use $this. */
-	public static function uninstall() {
-		// Settings + last-run bookkeeping (stored via update_option, not transients).
-		delete_option( self::OPTION_KEY );
-		delete_option( self::SYNC_LAST_RESULT );
-		delete_option( self::SYNC_LAST_REPORT );
-		// Scheduled events.
-		wp_clear_scheduled_hook( self::CRON_HOOK );
-		wp_clear_scheduled_hook( self::RESUME_HOOK );
-		// In-flight sync transients.
-		delete_transient( self::SYNC_LOCK_TRANSIENT );
-		delete_transient( self::SYNC_PROGRESS_TRANSIENT );
-		delete_transient( self::SYNC_KEYS_TRANSIENT );
-	}
 }
 
 register_activation_hook( __FILE__, array( 'WC_Product_Sync', 'activate' ) );
 register_deactivation_hook( __FILE__, array( 'WC_Product_Sync', 'deactivate' ) );
-register_uninstall_hook( __FILE__, array( 'WC_Product_Sync', 'uninstall' ) );
 add_action( 'plugins_loaded', array( 'WC_Product_Sync', 'instance' ) );
+</stdin>
+codex
+I’ll update the single SQL line in `wc-product-sync.php` and verify the surrounding diff stays scoped.
+exec
+/usr/bin/bash -lc 'git status --short' in /home/seth/Projekty/wpwc-prod-sync
+ succeeded in 0ms:
+?? LOOP.md
+?? PLAN.md
+?? claude-plan-r1.txt
+?? codex-impl-r1.txt
+
+exec
+/usr/bin/bash -lc "rg -n \"SELECT post_id FROM \\{\\"'$wpdb->postmeta'"\\} WHERE meta_key\" wc-product-sync.php" in /home/seth/Projekty/wpwc-prod-sync
+ exited 1 in 0ms:
+codex
+The worktree has only unrelated untracked planning files. The exact search pattern did not match, so I’m locating the force-full sync block directly before editing.
+exec
+/usr/bin/bash -lc 'rg -n "META_SYNCED|PEŁNA SYNCHRONIZACJA|force_full" wc-product-sync.php' in /home/seth/Projekty/wpwc-prod-sync
+ succeeded in 0ms:
+39:	const META_SYNCED       = '_wps_synced';
+413:		'force_full_sync'     => 0,
+538:		$out['force_full_sync']     = empty( $input['force_full_sync'] ) ? 0 : 1;
+853:							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[force_full_sync]" value="1"
+854:								<?php checked( ! empty( $opts['force_full_sync'] ) ); ?> /> <?php esc_html_e( 'Wyczyść lokalne produkty sync przed uruchomieniem', 'wc-product-sync' ); ?></label>
+872:									'<code>' . esc_html( self::META_SYNCED ) . '</code>',
+1216:		// absent progress OR current_page<1 both mean "first pass" — the only time force_full and
+1220:		// "first batch" (which would reset the result/report/keys and, with force_full, re-delete
+1237:		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && $is_first_batch;
+1238:		if ( $force_full && ! $dry_run ) {
+1239:			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
+1241:			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
+2274:		update_post_meta( $product_id, self::META_SYNCED, time() );
+2324:						'key'     => self::META_SYNCED,
+
+exec
+/usr/bin/bash -lc "sed -n '1218,1248p' wc-product-sync.php" in /home/seth/Projekty/wpwc-prod-sync
+ succeeded in 0ms:
+		// First batch of a fresh run only when there's no prior page AND no mid-page offset. A
+		// mid-page-1 resume saves current_page=0 with page_offset>0 — it must NOT be treated as
+		// "first batch" (which would reset the result/report/keys and, with force_full, re-delete
+		// products on every resume).
+		$is_first_batch = empty( $progress )
+			|| ( (int) ( $progress['current_page'] ?? 0 ) < 1 && (int) ( $progress['page_offset'] ?? 0 ) < 1 );
+
+		// Fresh run: start collecting source keys + the per-item report from scratch, and reset
+		// the cumulative result (#1 — needed for scheduled/cron runs, which never hit the manual
+		// kickoff's reset, so counts would otherwise accumulate across daily runs).
+		if ( $is_first_batch ) {
+			$this->reset_run_report();
+			if ( ! $dry_run ) {
+				$this->reset_run_result();
+				delete_transient( self::SYNC_KEYS_TRANSIENT );
+			}
+		}
+
+		// Pełna synchronizacja – usuń stare lokalne produkty. Only on the first pass.
+		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && $is_first_batch;
+		if ( $force_full && ! $dry_run ) {
+			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
+			global $wpdb;
+			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
+			$ids = array_unique( array_map( 'absint', $ids ) );
+			if ( ! empty( $ids ) ) {
+				foreach ( $ids as $pid ) {
+					$p = wc_get_product( $pid );
+					if ( $p ) {
+						$p->delete( true );
+						$this->log( 'info', sprintf( 'Usunięto lokalny produkt ID=%d (full sync)', $pid ) );
+
+codex
+I found the target at line 1241. I’m replacing only that assignment with the prepared query form.
+apply patch
+patch: completed
+/home/seth/Projekty/wpwc-prod-sync/wc-product-sync.php
+diff --git a/wc-product-sync.php b/wc-product-sync.php
+index 30b0b716eb1524f267ce7bd669ce06039cbdafa7..585ae36b9736d87960543f9ad2a0da617e525887
+--- a/wc-product-sync.php
++++ b/wc-product-sync.php
+@@ -1238,7 +1238,7 @@
+ 		if ( $force_full && ! $dry_run ) {
+ 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
+ 			global $wpdb;
+-			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
++			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
+ 			$ids = array_unique( array_map( 'absint', $ids ) );
+ 			if ( ! empty( $ids ) ) {
+ 				foreach ( $ids as $pid ) {
+
+diff --git a/wc-product-sync.php b/wc-product-sync.php
+index 30b0b716eb1524f267ce7bd669ce06039cbdafa7..585ae36b9736d87960543f9ad2a0da617e525887
+--- a/wc-product-sync.php
++++ b/wc-product-sync.php
+@@ -1238,7 +1238,7 @@
+ 		if ( $force_full && ! $dry_run ) {
+ 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
+ 			global $wpdb;
+-			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
++			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
+ 			$ids = array_unique( array_map( 'absint', $ids ) );
+ 			if ( ! empty( $ids ) ) {
+ 				foreach ( $ids as $pid ) {
+
+codex
+The code change is applied. I’m checking the diff now to confirm it is exactly one SQL-line change.
+exec
+/usr/bin/bash -lc 'git diff -- wc-product-sync.php' in /home/seth/Projekty/wpwc-prod-sync
+ succeeded in 0ms:
+diff --git a/wc-product-sync.php b/wc-product-sync.php
+index 30b0b71..585ae36 100644
+--- a/wc-product-sync.php
++++ b/wc-product-sync.php
+@@ -1238,7 +1238,7 @@ $defaults = array(
+ 		if ( $force_full && ! $dry_run ) {
+ 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
+ 			global $wpdb;
+-			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
++			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
+ 			$ids = array_unique( array_map( 'absint', $ids ) );
+ 			if ( ! empty( $ids ) ) {
+ 				foreach ( $ids as $pid ) {
+
+exec
+/usr/bin/bash -lc "sed -n '1237,1244p' wc-product-sync.php" in /home/seth/Projekty/wpwc-prod-sync
+ succeeded in 0ms:
+		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && $is_first_batch;
+		if ( $force_full && ! $dry_run ) {
+			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
+			global $wpdb;
+			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
+			$ids = array_unique( array_map( 'absint', $ids ) );
+			if ( ! empty( $ids ) ) {
+				foreach ( $ids as $pid ) {
+
+diff --git a/wc-product-sync.php b/wc-product-sync.php
+index 30b0b716eb1524f267ce7bd669ce06039cbdafa7..585ae36b9736d87960543f9ad2a0da617e525887
+--- a/wc-product-sync.php
++++ b/wc-product-sync.php
+@@ -1238,7 +1238,7 @@
+ 		if ( $force_full && ! $dry_run ) {
+ 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
+ 			global $wpdb;
+-			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
++			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
+ 			$ids = array_unique( array_map( 'absint', $ids ) );
+ 			if ( ! empty( $ids ) ) {
+ 				foreach ( $ids as $pid ) {
+
+codex
+Updated [wc-product-sync.php](/home/seth/Projekty/wpwc-prod-sync/wc-product-sync.php:1241) so the query now uses `$wpdb->prepare()`.
+
+Verified the diff is limited to that single SQL query line.
+diff --git a/wc-product-sync.php b/wc-product-sync.php
+index 30b0b716eb1524f267ce7bd669ce06039cbdafa7..585ae36b9736d87960543f9ad2a0da617e525887
+--- a/wc-product-sync.php
++++ b/wc-product-sync.php
+@@ -1238,7 +1238,7 @@
+ 		if ( $force_full && ! $dry_run ) {
+ 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
+ 			global $wpdb;
+-			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
++			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
+ 			$ids = array_unique( array_map( 'absint', $ids ) );
+ 			if ( ! empty( $ids ) ) {
+ 				foreach ( $ids as $pid ) {
+
+tokens used
+37 589
+Updated [wc-product-sync.php](/home/seth/Projekty/wpwc-prod-sync/wc-product-sync.php:1241) so the query now uses `$wpdb->prepare()`.
+
+Verified the diff is limited to that single SQL query line.

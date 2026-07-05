@@ -1,0 +1,21 @@
+## Review
+
+**Context:** `META_SYNCED` is a class constant (`'_wps_synced'`, line 39) — hardcoded, so the original was never *actually* exploitable. But switching to `prepare()` is still the correct WPCS-compliant fix and future-proofs it.
+
+**1. Identical semantics? ✅**
+`%s` binds `'_wps_synced'` and `prepare()` wraps it in single quotes, producing byte-for-byte the same SQL: `... WHERE meta_key = '_wps_synced'`. Same query, same rows.
+
+**2. `prepare()` used correctly, table name still interpolated? ✅**
+- One `%s` placeholder, one argument — correct arity and correct type (string value).
+- `{$wpdb->postmeta}` stays interpolated, which is right: table names **cannot** be passed as `prepare()` placeholders (there's no identifier placeholder), and `$wpdb->postmeta` is a trusted core-provided property, not user input.
+
+**3. Edge cases / regressions? ✅ None.**
+- Return value of `prepare()` feeds `get_col()` exactly as a string literal did before.
+- `array_unique( array_map( 'absint', ... ) )` downstream is unaffected.
+- No newer WP concern here (e.g. `_wps_synced` isn't a registered meta needing meta-query changes).
+
+**4. PHPCS/WPCS? ✅**
+- Clears `WordPress.DB.PreparedSQL.NotPrepared` — the original raw `get_col()` string would trip it.
+- `WordPress.DB.PreparedSQL.InterpolatedNotPrepared` does **not** fire on `$wpdb->postmeta` — WPCS allowlists `$wpdb` table properties as safe.
+
+**YES THE FIX IS CORRECT**

@@ -1,0 +1,158 @@
+I now have exact line numbers and surrounding context for all four issues. Here is the complete plan.
+
+PLAN_START_N3
+**Issue N3 — Variation attribute slug vs diacritics collision**
+
+**Location:** `build_variation_attributes()`, lines 2050–2051.
+
+**Current code (lines 2050–2051):**
+```php
+				$term = get_term_by( 'name', $a['option'] ?? '', $map['taxonomy'] );
+				$out[ $map['taxonomy'] ] = $term ? $term->slug : sanitize_title( $a['option'] ?? '' );
+```
+
+**Replace with:**
+```php
+				$option = $a['option'] ?? '';
+				$term   = get_term_by( 'name', $option, $map['taxonomy'] );
+				if ( ( ! $term || is_wp_error( $term ) ) && '' !== trim( (string) $option ) ) {
+					// Term not found — create/fetch it via ensure_term() so it gets WP's proper
+					// slug. Falling back to sanitize_title() here mangles Polish diacritics
+					// (Żółty → zolty) and produces a slug that never matches the real term,
+					// silently dropping the variation's attribute value.
+					$tid  = $this->ensure_term( $map['taxonomy'], $option );
+					$term = $tid ? get_term( $tid, $map['taxonomy'] ) : null;
+				}
+				$out[ $map['taxonomy'] ] = ( $term && ! is_wp_error( $term ) ) ? $term->slug : sanitize_title( $option );
+```
+
+**Interaction with existing methods:**
+- `ensure_term( $taxonomy, $name )` (line 1941) already exists: it looks up by name, creates via `wp_insert_term()` if missing (handling the `term_exists` error-data case), and returns an `int` term_id (0 on failure). We then `get_term()` to read `->slug`.
+- The `build_parent_attributes()` path (line ~1994) also relies on `ensure_term()` to create parent terms, so by the time variations are processed the terms usually already exist — this fix covers the case where a variation references an option the parent didn't enumerate.
+- The final `sanitize_title()` remains only as a last-resort guard if term creation genuinely fails (keeps behaviour non-fatal).
+
+**No helper changes needed** — `ensure_term()` is reused as-is.
+PLAN_END_N3
+
+PLAN_START_N5
+**Issue N5 — Type-change orphaned variations**
+
+**Location:** `ensure_product_type()`, lines 1716–1726.
+
+**Current code (lines 1716–1726):**
+```php
+	private function ensure_product_type( $existing_id, $wanted_class, $wanted_term ) {
+		$product = $existing_id ? wc_get_product( $existing_id ) : null;
+		if ( $product && ! is_a( $product, $wanted_class ) ) {
+			wp_set_object_terms( $existing_id, $wanted_term, 'product_type' );
+			$product = new $wanted_class( $existing_id );
+		}
+		if ( ! $product ) {
+			$product = new $wanted_class();
+		}
+		return $product;
+	}
+```
+
+**Replace with:**
+```php
+	private function ensure_product_type( $existing_id, $wanted_class, $wanted_term ) {
+		$product = $existing_id ? wc_get_product( $existing_id ) : null;
+		if ( $product && ! is_a( $product, $wanted_class ) ) {
+			// Type is changing. If the product WAS variable and the new type is not, its
+			// variation child posts would be left orphaned in the DB (wp_posts rows with no
+			// parent product-type). Delete them before switching type.
+			if ( 'variable' !== $wanted_term && $product->is_type( 'variable' ) ) {
+				foreach ( $product->get_children() as $vid ) {
+					$child = wc_get_product( $vid );
+					if ( $child ) {
+						$child->delete( true );
+					} else {
+						wp_delete_post( $vid, true );
+					}
+					$this->log( 'info', sprintf( 'Usunięto osieroconą wariację ID=%d (zmiana typu produktu %d → %s)', $vid, (int) $existing_id, $wanted_term ) );
+				}
+			}
+			wp_set_object_terms( $existing_id, $wanted_term, 'product_type' );
+			$product = new $wanted_class( $existing_id );
+		}
+		if ( ! $product ) {
+			$product = new $wanted_class();
+		}
+		return $product;
+	}
+```
+
+**Interaction with existing methods:**
+- `$product` here is the pre-change WC_Product loaded from `$existing_id`, so `is_type('variable')` and `get_children()` reflect the OLD (variable) structure — exactly what we need to enumerate before conversion.
+- Deletion mirrors the pattern already used in `sync_variations()` (line ~2029) and the force-full path: `$child->delete( true )` for a real product, `wp_delete_post( $vid, true )` fallback.
+- Guarded by `'variable' !== $wanted_term`, so variable→variable calls are unaffected and `sync_variations()` still runs its own reconciliation afterward for genuine variable products.
+- Called from `update_existing_product()` (line 1736) and `upsert_grouped()` (line 2165); both benefit (e.g. variable→grouped or variable→simple in the source).
+
+**No helper changes needed.**
+PLAN_END_N5
+
+PLAN_START_N9
+**Issue N9 — Missing uninstall hook**
+
+**Location:** add a static method before the class-closing brace (line 2488), and register the hook after line 2491.
+
+**Step 1 — add method immediately before the final `}` on line 2488** (after `enforce_soft_delete_limit`/`log` block ending at line 2487):
+```php
+	/** Uninstall cleanup. Removes plugin OPTIONS, scheduled cron events, and transients only.
+	 *  Product meta ({@see META_SYNCED}, {@see META_SOURCE_ID}, image maps) and the soft-delete
+	 *  tag are intentionally LEFT INTACT: deleting them would destroy synced product data that
+	 *  the store still relies on. Must be static — register_uninstall_hook cannot use $this. */
+	public static function uninstall() {
+		// Settings + last-run bookkeeping (stored via update_option, not transients).
+		delete_option( self::OPTION_KEY );
+		delete_option( self::SYNC_LAST_RESULT );
+		delete_option( self::SYNC_LAST_REPORT );
+		// Scheduled events.
+		wp_clear_scheduled_hook( self::CRON_HOOK );
+		wp_clear_scheduled_hook( self::RESUME_HOOK );
+		// In-flight sync transients.
+		delete_transient( self::SYNC_LOCK_TRANSIENT );
+		delete_transient( self::SYNC_PROGRESS_TRANSIENT );
+		delete_transient( self::SYNC_KEYS_TRANSIENT );
+	}
+```
+
+**Step 2 — register the hook after line 2491** (between the deactivation hook and the `plugins_loaded` action):
+```php
+register_uninstall_hook( __FILE__, array( 'WC_Product_Sync', 'uninstall' ) );
+```
+
+**Interaction with existing code:**
+- Reuses the existing class constants: `OPTION_KEY`, `SYNC_LAST_RESULT`, `SYNC_LAST_REPORT`, `CRON_HOOK`, `RESUME_HOOK`, `SYNC_LOCK_TRANSIENT`, `SYNC_PROGRESS_TRANSIENT`, `SYNC_KEYS_TRANSIENT` (all defined lines 20–35).
+- Important correction to the issue text's assumption: `SYNC_LAST_RESULT` and `SYNC_LAST_REPORT` are stored with `update_option()` (see `accumulate_run_result`/`append_run_report`), so they are removed with `delete_option()`, **not** `delete_transient()`.
+- A static method suffices; the inner-class approach isn't needed because we deliberately do **no** per-product cleanup (that's what preserves data on other installs), so there are no options to consult.
+- `register_uninstall_hook` only fires on true uninstall (not deactivate), so it won't interfere with `deactivate()` (line-level `wp_clear_scheduled_hook( CRON_HOOK )` there).
+PLAN_END_N9
+
+PLAN_START_N10
+**Issue N10 — Missing load_plugin_textdomain call**
+
+**Location:** add an action in `__construct()` (after line 91) and add a method (place it near `allow_source_host`, e.g. after line 96).
+
+**Step 1 — in `__construct()`, add after line 91 (`admin_notices` action):**
+```php
+		add_action( 'init', array( $this, 'load_textdomain' ) );
+```
+
+**Step 2 — add the method** (e.g. immediately after the `__construct()` closing brace at line 96, before `allow_source_host`):
+```php
+	/** Load the plugin's translations from /languages. */
+	public static function load_textdomain() {
+		load_plugin_textdomain( 'wc-product-sync', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' );
+	}
+```
+
+**Interaction with existing code:**
+- Matches the `Text Domain: wc-product-sync` header and every `__()` / `esc_html__()` / `esc_html_e()` call throughout the file (all already use the `'wc-product-sync'` domain).
+- Hooked on `init` (correct timing for `load_plugin_textdomain`); the callback via `array( $this, 'load_textdomain' )` works even though the method is `static`.
+- `plugin_basename( __FILE__ )` resolves correctly because the method lives in the main plugin file, so `dirname(...) . '/languages'` points at the plugin's own `languages/` directory.
+- No `.mo`/`.pot` files are required for this to be harmless — WP silently no-ops if the `languages/` folder or files are absent.
+PLAN_END_N10
+
+**Note:** All four edits are independent and non-overlapping (lines 84–96, 1716–1726, 2050–2051, 2488/2491), so they can be applied in any order without conflict.
