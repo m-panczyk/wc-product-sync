@@ -1238,7 +1238,7 @@ $defaults = array(
 		if ( $force_full && ! $dry_run ) {
 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
 			global $wpdb;
-			$ids = $wpdb->get_col( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '" . self::META_SYNCED . "'" );
+			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
 			$ids = array_unique( array_map( 'absint', $ids ) );
 			if ( ! empty( $ids ) ) {
 				foreach ( $ids as $pid ) {
