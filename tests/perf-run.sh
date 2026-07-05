@@ -13,6 +13,7 @@ set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$DIR/perf.env"
 LABEL="${1:-manual}"
+FORCE_FULL="${2:-1}"   # 1 = wipe+recreate (comparable baseline); 0 = update in place (incremental)
 CSV="$DIR/../metrics/perf-history.csv"
 
 SSHOPTS=(-o BatchMode=yes -o ControlMaster=auto -o ControlPath=/tmp/wps-perf-%r@%h -o ControlPersist=300)
@@ -27,8 +28,8 @@ progress_set() { qwp transient get wps_sync_progress --format=json 2>/dev/null |
 VERSION=$(qwp plugin get wc-product-sync --field=version 2>/dev/null | tr -d '\r')
 echo "== perf-run: label='$LABEL'  plugin v$VERSION  $(date '+%F %T') =="
 
-# Comparable baseline: force_full clears previously-synced products so every run creates from scratch.
-qeval '$o=get_option("wc_product_sync_options");$o["force_full_sync"]=1;update_option("wc_product_sync_options",$o);' >/dev/null 2>&1
+# force_full=1 wipes+recreates (comparable baseline); force_full=0 updates in place (tests incremental).
+qeval '$o=get_option("wc_product_sync_options");$o["force_full_sync"]='"$FORCE_FULL"';update_option("wc_product_sync_options",$o);' >/dev/null 2>&1
 qwp transient delete wps_sync_progress   >/dev/null 2>&1
 qwp transient delete wps_sync_running    >/dev/null 2>&1
 qwp option   delete wps_last_sync_result >/dev/null 2>&1
