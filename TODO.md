@@ -1,6 +1,6 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.9.9** — next tagged release = 1.0
+Current version: **0.9.11** — next tagged release = 1.0
 
 ## Remaining before 1.0 (only these left)
 - **N3** — variation attribute slug vs diacritics: `build_variation_attributes` falls back to
@@ -22,6 +22,26 @@ Source=Proxmox `192.168.66.121` (492-product clone + images), target=QNAP `192.1
 metrics=Telegraf→InfluxDB (`mppcc`/`tests`) + Grafana dashboard `d/wps-perf` with `wps-sync` annotations.
 `tests/perf-run.sh <label> [force_full]` drives a timed sync + annotation + `metrics/perf-history.csv`.
 Benchmarks (492 prod): full+images 892s; incremental no-change **41s** (21.7×); ~20% images changed 104s.
+
+## v0.9.11 — time-boxed batches with item-level resume (timeout-proof)
+Each batch runs against a TIME budget (`max_batch_seconds`, default 20, under the typical 30s PHP cap)
+and stops after the current product when the budget (or product batch-limit) is hit, saving progress at
+ITEM granularity (`current_page` + `page_offset`). Resume skips already-done items on the in-progress
+page → no batch ever approaches a timeout, progress always advances, terminates over many small batches
+via WP-Cron with zero intervention. Belt-and-suspenders with v0.9.10's set_time_limit.
+- **Critical fix inside:** a mid-page-1 stop saves current_page=0, which collided with the "first batch"
+  test (current_page<1) → reset result/report/keys every resume and, with force_full, re-deleted products.
+  `is_first_batch` now also requires `page_offset<1`.
+- New setting "Limit czasu batcha (s)". **Verified:** budget=3s forced mid-page stops on every page;
+  sequential resume, updated=492, **492/492 products freshly synced (no loss)**, clean termination.
+
+## v0.9.10 — fix: 30s timeout during image resize on resume
+`run_resume_batch()` (fired by WP-Cron, usually a wp-cron.php web request bound by the default 30s
+`max_execution_time`) never called `set_time_limit()`, so image-heavy resume batches died mid-way in
+Imagick resize. Added `@set_time_limit(900)` + `@ignore_user_abort(true)`. NOT caught earlier because
+the perf runner drives resumes via WP-CLI (no time limit). **Verified in a web context** (wp-cron.php,
+30s SAPI confirmed): the same heavy batch ran ~240s without dying. Hard-cap hosts: also lower the batch
+time budget — see v0.9.11.
 
 ## v0.9.9 — incremental image sync (parent + variation, create AND update)
 Images were create-only, so source image changes never propagated. New `sync_product_images()` keeps a
