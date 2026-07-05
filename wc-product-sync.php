@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.7
+ * Version:           0.9.8
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -1194,10 +1194,13 @@ $defaults = array(
 		// (single-pass) soft-delete may run. A real resume has current_page>=1.
 		$is_first_batch = empty( $progress ) || (int) ( $progress['current_page'] ?? 0 ) < 1;
 
-		// Fresh run: start collecting source keys + the per-item report from scratch.
+		// Fresh run: start collecting source keys + the per-item report from scratch, and reset
+		// the cumulative result (#1 — needed for scheduled/cron runs, which never hit the manual
+		// kickoff's reset, so counts would otherwise accumulate across daily runs).
 		if ( $is_first_batch ) {
 			$this->reset_run_report();
 			if ( ! $dry_run ) {
+				$this->reset_run_result();
 				delete_transient( self::SYNC_KEYS_TRANSIENT );
 			}
 		}
@@ -1263,7 +1266,6 @@ $defaults = array(
 
 		$total_counted    = 0;
 		$source_keys      = array();
-		$grouped_buf      = array();
 		$seen_source_ids  = array(); // Dedup: track processed product IDs (Codex R3 fix)
 		$hit_batch_limit  = false;   // Set true when the page loop stops at the batch limit
 
@@ -1329,12 +1331,13 @@ $defaults = array(
 					}
 				}
 
-				// Grouped products buffered, others processed immediately
+				// Grouped products are handled in a dedicated FINAL pass (after every product across
+				// all batches is synced), so their children resolve no matter which batch they're on
+				// and no matter the order (B3 fix). Their source key was already tracked above.
 				if ( isset( $p['type'] ) && 'grouped' === $p['type'] ) {
-					$grouped_buf[] = $p;
-				} else {
-					$this->process_single_product( $p, $dry_run, $stats );
+					continue;
 				}
+				$this->process_single_product( $p, $dry_run, $stats );
 			}
 
 			unset( $batch );
@@ -1351,8 +1354,7 @@ $defaults = array(
 					: ( $total_pages > 0 ? $total_pages * $per_page : $total_counted );
 				$this->save_sync_progress( $page, $products_processed, $true_total );
 
-				// Batch limit check AFTER completing the page (Codex #3 fix: process-before-check)
-				// Note: we break (not return) to ensure grouped_buf for THIS page is still drained
+				// Batch limit check AFTER completing the page (Codex #3 fix: process-before-check).
 				if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
 					$still_batching = true;
 					$this->log( 'info', sprintf( 'Limit batchu (%d produktów) osiągnięty po stronie %d — harmonogramowanie wznowienia.', $batch_limit, $page ) );
@@ -1362,21 +1364,12 @@ $defaults = array(
 					}
 					wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // 30s buffer
 					$hit_batch_limit = true; // Handled after the loop: keep progress, resume scheduled
-					break; // Stop fetching pages; grouped drain below still runs for THIS page
+					break; // Stop fetching pages; grouped are handled in the final pass
 				}
 			}
 
 		$page++;
 		} while ( $count === $per_page );
-
-		// Drain grouped products buffered during this run. They were already counted in the
-		// page loop (no increment here) and belong to pages we already fetched, so we always
-		// process the full buffer. Dropping them at the batch limit would lose data: resume
-		// restarts at the NEXT page and never re-fetches these groupeds. Grouped children are
-		// pre-counted too, so draining cannot push us over the limit.
-		foreach ( $grouped_buf as $p ) {
-			$this->process_single_product( $p, $dry_run, $stats );
-		}
 
 		// Record this batch's source keys so soft-delete on the final batch sees the whole
 		// catalog. Persist for real runs before any early return below (dry runs are single-pass
@@ -1420,6 +1413,11 @@ $defaults = array(
 		}
 
 		if ( function_exists( 'gc_collect_cycles' ) ) gc_collect_cycles();
+
+		// Grouped products — FINAL pass (B3). Now that every simple/variable product across all
+		// batches is synced, fetch grouped products from the source and upsert them; their children
+		// resolve by _wps_source_id regardless of which batch they were in, or their order.
+		$this->sync_grouped_products( $dry_run, $stats );
 
 		// Handle products removed from source (soft/hard per deletion_mode). We only reach here
 		// when the sync is COMPLETE (all pages processed across however many batches). Compare the
@@ -2014,6 +2012,42 @@ $defaults = array(
 	 *  GROUPED
 	 * ================================================================== */
 
+	/** Final pass (B3): fetch all grouped products from the source and upsert them once every
+	 *  other product is synced, so their children resolve by _wps_source_id across batches/order.
+	 *  Runs once at sync completion. Respects the "grouped" type toggle + status filter. */
+	private function sync_grouped_products( $dry_run, &$stats ) {
+		if ( ! $this->type_enabled( 'grouped' ) ) {
+			return;
+		}
+		$page     = 1;
+		$per_page = $this->cfg_per_page();
+		$total    = 0;
+		do {
+			$batch = $this->api_get( '/wp-json/wc/v3/products', array(
+				'per_page' => $per_page,
+				'page'     => $page,
+				'status'   => 'any',
+				'type'     => 'grouped',
+			) );
+			if ( is_wp_error( $batch ) ) {
+				$this->log( 'warning', 'Pobieranie grouped (strona ' . $page . '): ' . $batch->get_error_message() );
+				break;
+			}
+			$count = count( $batch );
+			if ( 0 === $count ) {
+				break;
+			}
+			foreach ( $batch as $p ) {
+				$this->process_single_product( $p, $dry_run, $stats );
+				$total++;
+			}
+			$page++;
+		} while ( $count === $per_page );
+		if ( $total > 0 ) {
+			$this->log( 'info', sprintf( 'Przetworzono %d produktów grouped (pass końcowy).', $total ) );
+		}
+	}
+
 	private function upsert_grouped( array $p, $dry_run ) {
 		$sku         = isset( $p['sku'] ) ? trim( $p['sku'] ) : '';
 		$existing_id = $sku ? self::sku_to_id( $sku ) : 0;
@@ -2047,24 +2081,24 @@ $defaults = array(
 
 		$child_ids = array();
 		foreach ( ( $p['grouped_products'] ?? array() ) as $child_source_id ) {
-			$child_sku = $this->source_id_to_sku[ (int) $child_source_id ] ?? '';
-			if ( ! $child_sku ) {
-				$this->report_add( 'warnings', array(
-					'name' => $p['name'] ?? '?', 'sku' => $p['sku'] ?? '', 'type' => 'grouped',
-					'reason' => sprintf( 'dziecko src_id=%d bez SKU — pominięte', (int) $child_source_id ),
-				) );
-				$this->log( 'warning', sprintf( "Grouped '%s': dziecko src_id=%d bez SKU – pomijam.", $p['name'] ?? '?', $child_source_id ) );
-				continue;
+			// B3: resolve the child by its source id → local product (_wps_source_id meta), which
+			// works regardless of which batch synced it. Fall back to the SKU map for children
+			// seen this run but not yet carrying the meta.
+			$local = self::source_id_to_local( (int) $child_source_id );
+			if ( ! $local ) {
+				$child_sku = $this->source_id_to_sku[ (int) $child_source_id ] ?? '';
+				if ( '' !== $child_sku ) {
+					$local = self::sku_to_id( $child_sku );
+				}
 			}
-			$local = self::sku_to_id( $child_sku );
 			if ( $local ) {
 				$child_ids[] = $local;
 			} else {
 				$this->report_add( 'warnings', array(
 					'name' => $p['name'] ?? '?', 'sku' => $p['sku'] ?? '', 'type' => 'grouped',
-					'reason' => sprintf( 'brak lokalnego dziecka SKU=%s (jeszcze niezsynchronizowane?)', $child_sku ),
+					'reason' => sprintf( 'brak lokalnego dziecka src_id=%d (niezsynchronizowane — inny status/typ, brak SKU?)', (int) $child_source_id ),
 				) );
-				$this->log( 'warning', sprintf( "Grouped '%s': brak lokalnego dziecka SKU=%s.", $p['name'] ?? '?', $child_sku ) );
+				$this->log( 'warning', sprintf( "Grouped '%s': brak lokalnego dziecka src_id=%d.", $p['name'] ?? '?', $child_source_id ) );
 			}
 		}
 
