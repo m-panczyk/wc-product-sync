@@ -89,10 +89,16 @@ final class WC_Product_Sync {
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
 		add_action( self::RESUME_HOOK, array( $this, 'run_resume_batch' ) );
 		add_action( 'admin_notices', array( $this, 'maybe_wc_missing_notice' ) );
+		add_action( 'init', array( $this, 'load_textdomain' ) );
 		// Allow image sideloading from the configured source host even if it's a private/LAN
 		// IP: WP's SSRF guard (wp_http_validate_url) otherwise blocks download_url() for
 		// RFC1918 hosts, so products would sync without images against a LAN/staging source.
 		add_filter( 'http_request_host_is_external', array( $this, 'allow_source_host' ), 10, 2 );
+	}
+
+	/** Load the plugin's translations from /languages. */
+	public static function load_textdomain() {
+		load_plugin_textdomain( 'wc-product-sync', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' );
 	}
 
 	/** Treat the admin-configured source host as external so its images can be sideloaded. */
@@ -1716,6 +1722,20 @@ $defaults = array(
 	private function ensure_product_type( $existing_id, $wanted_class, $wanted_term ) {
 		$product = $existing_id ? wc_get_product( $existing_id ) : null;
 		if ( $product && ! is_a( $product, $wanted_class ) ) {
+			// Type is changing. If the product WAS variable and the new type is not, its
+			// variation child posts would be left orphaned in the DB (wp_posts rows with no
+			// parent product-type). Delete them before switching type.
+			if ( 'variable' !== $wanted_term && $product->is_type( 'variable' ) ) {
+				foreach ( $product->get_children() as $vid ) {
+					$child = wc_get_product( $vid );
+					if ( $child ) {
+						$child->delete( true );
+					} else {
+						wp_delete_post( $vid, true );
+					}
+					$this->log( 'info', sprintf( 'Usunięto osieroconą wariację ID=%d (zmiana typu produktu %d → %s)', $vid, (int) $existing_id, $wanted_term ) );
+				}
+			}
 			wp_set_object_terms( $existing_id, $wanted_term, 'product_type' );
 			$product = new $wanted_class( $existing_id );
 		}
@@ -2047,8 +2067,17 @@ $defaults = array(
 				if ( ! $map ) {
 					continue;
 				}
-				$term = get_term_by( 'name', $a['option'] ?? '', $map['taxonomy'] );
-				$out[ $map['taxonomy'] ] = $term ? $term->slug : sanitize_title( $a['option'] ?? '' );
+				$option = $a['option'] ?? '';
+				$term   = get_term_by( 'name', $option, $map['taxonomy'] );
+				if ( ( ! $term || is_wp_error( $term ) ) && '' !== trim( (string) $option ) ) {
+					// Term not found — create/fetch it via ensure_term() so it gets WP's proper
+					// slug. Falling back to sanitize_title() here mangles Polish diacritics
+					// (Żółty → zolty) and produces a slug that never matches the real term,
+					// silently dropping the variation's attribute value.
+					$tid  = $this->ensure_term( $map['taxonomy'], $option );
+					$term = $tid ? get_term( $tid, $map['taxonomy'] ) : null;
+				}
+				$out[ $map['taxonomy'] ] = ( $term && ! is_wp_error( $term ) ) ? $term->slug : sanitize_title( $option );
 			} else {
 				$out[ sanitize_title( $a['name'] ?? '' ) ] = $a['option'] ?? '';
 			}
@@ -2485,8 +2514,27 @@ $defaults = array(
 			wc_get_logger()->log( $level, $message, array( 'source' => self::LOG_SOURCE ) );
 		}
 	}
+
+	/** Uninstall cleanup. Removes plugin OPTIONS, scheduled cron events, and transients only.
+	 *  Product meta ({@see META_SYNCED}, {@see META_SOURCE_ID}, image maps) and the soft-delete
+	 *  tag are intentionally LEFT INTACT: deleting them would destroy synced product data that
+	 *  the store still relies on. Must be static — register_uninstall_hook cannot use $this. */
+	public static function uninstall() {
+		// Settings + last-run bookkeeping (stored via update_option, not transients).
+		delete_option( self::OPTION_KEY );
+		delete_option( self::SYNC_LAST_RESULT );
+		delete_option( self::SYNC_LAST_REPORT );
+		// Scheduled events.
+		wp_clear_scheduled_hook( self::CRON_HOOK );
+		wp_clear_scheduled_hook( self::RESUME_HOOK );
+		// In-flight sync transients.
+		delete_transient( self::SYNC_LOCK_TRANSIENT );
+		delete_transient( self::SYNC_PROGRESS_TRANSIENT );
+		delete_transient( self::SYNC_KEYS_TRANSIENT );
+	}
 }
 
 register_activation_hook( __FILE__, array( 'WC_Product_Sync', 'activate' ) );
 register_deactivation_hook( __FILE__, array( 'WC_Product_Sync', 'deactivate' ) );
+register_uninstall_hook( __FILE__, array( 'WC_Product_Sync', 'uninstall' ) );
 add_action( 'plugins_loaded', array( 'WC_Product_Sync', 'instance' ) );
