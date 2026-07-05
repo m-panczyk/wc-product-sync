@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.8
+ * Version:           0.9.9
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -41,6 +41,7 @@ final class WC_Product_Sync {
 	const TAG_SLUG          = 'wps-usuniete';
 	const TAG_NAME          = 'Usunięte (sync)';
 	const META_SOURCE_ID    = '_wps_source_id';
+	const META_IMAGE_MAP    = '_wps_image_map'; // JSON: source image key => local attachment id (incremental sync)
 
 	/** @var WC_Product_Sync|null */
 	private static $instance = null;
@@ -1707,6 +1708,11 @@ $defaults = array(
 			throw new \RuntimeException( 'save() zwróciło 0' );
 		}
 		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
+		// Images on UPDATE too (incremental — only new/changed download). Gated by the "images"
+		// field so admins who manage images locally aren't overwritten.
+		if ( $this->field_on( 'images' ) && ! empty( $p['images'] ) ) {
+			$this->sync_product_images( $product, $p['images'] );
+		}
 		// #1: re-sync variations on UPDATE too (previously only on create), so variation
 		// price/stock changes and added/removed variations in the source are reflected.
 		if ( 'WC_Product_Variable' === $wanted_class ) {
@@ -1758,7 +1764,7 @@ $defaults = array(
 		}
 		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
 		if ( $this->field_on( 'images' ) && ! empty( $p['images'] ) ) {
-			$this->set_product_images( $id, $p['images'] );
+			$this->sync_product_images( $product, $p['images'] );
 		}
 		if ( 'WC_Product_Variable' === $wanted_class ) {
 			$this->sync_variations( $id, (int) $p['id'] );
@@ -1956,12 +1962,9 @@ $defaults = array(
 				$variation->set_attributes( $attrs );
 
 				$new_vid = $variation->save();
-				if ( $this->field_on( 'images' ) && ! $is_update && ! empty( $sv['image']['src'] ) ) {
-					$att = $this->sideload_single( $sv['image']['src'], $new_vid );
-					if ( $att ) {
-						$variation->set_image_id( $att );
-						$variation->save();
-					}
+				// Variation image — incremental, on create AND update (only new/changed downloads).
+				if ( $this->field_on( 'images' ) && ! empty( $sv['image']['src'] ) ) {
+					$this->sync_product_images( $variation, array( $sv['image'] ) );
 				}
 
 				$kept[ $new_vid ] = true;
@@ -2120,8 +2123,8 @@ $defaults = array(
 			throw new \RuntimeException( 'save() zwróciło 0' );
 		}
 		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
-		if ( $this->field_on( 'images' ) && ! $is_update && ! empty( $p['images'] ) ) {
-			$this->set_product_images( $id, $p['images'] );
+		if ( $this->field_on( 'images' ) && ! empty( $p['images'] ) ) {
+			$this->sync_product_images( $product, $p['images'] );
 		}
 		$this->mark_synced( $id );
 		$this->log( 'info', sprintf( '%s grouped: %s (ID=%d, dzieci=%d)', $is_update ? 'Zaktualizowano' : 'Utworzono', $p['name'] ?? '?', $id, count( $child_ids ) ) );
@@ -2154,29 +2157,48 @@ $defaults = array(
 		return array_values( array_unique( $ids ) );
 	}
 
-	private function set_product_images( $product_id, array $images ) {
-		$attachment_ids = array();
+	/** Incrementally sync a product's (or variation's) images. Reuses already-downloaded images
+	 *  keyed by source image id, sideloads only NEW/changed ones, and removes ones the source no
+	 *  longer has. Runs on create AND update, so image changes propagate without re-downloading
+	 *  unchanged images. $images = WC REST "images" array (each has 'id' + 'src'). */
+	private function sync_product_images( $product, array $images ) {
+		$pid = $product->get_id();
+		$old = json_decode( (string) get_post_meta( $pid, self::META_IMAGE_MAP, true ), true );
+		if ( ! is_array( $old ) ) {
+			$old = array();
+		}
+		$new     = array();
+		$att_ids = array();
 		foreach ( $images as $img ) {
 			$src = isset( $img['src'] ) ? esc_url_raw( $img['src'] ) : '';
 			if ( '' === $src ) {
 				continue;
 			}
-			$att = $this->sideload_single( $src, $product_id );
+			$key = ! empty( $img['id'] ) ? 'id:' . (int) $img['id'] : 'url:' . $src;
+			if ( isset( $old[ $key ] ) && get_post_status( (int) $old[ $key ] ) ) {
+				$att = (int) $old[ $key ]; // already have it — no download
+			} else {
+				$att = $this->sideload_single( $src, $pid );
+			}
 			if ( $att ) {
-				$attachment_ids[] = $att;
+				$new[ $key ] = $att;
+				$att_ids[]   = $att;
 			}
 		}
-		if ( ! $attachment_ids ) {
-			return;
+		// Delete attachments we created for images the source no longer references.
+		foreach ( $old as $k => $att ) {
+			if ( ! isset( $new[ $k ] ) && ! in_array( (int) $att, $att_ids, true ) ) {
+				wp_delete_attachment( (int) $att, true );
+			}
 		}
-		$product = wc_get_product( $product_id );
-		if ( ! $product ) {
-			return;
+		if ( $att_ids ) {
+			$product->set_image_id( array_shift( $att_ids ) );
+			$product->set_gallery_image_ids( $att_ids );
+		} else {
+			$product->set_image_id( 0 );
+			$product->set_gallery_image_ids( array() );
 		}
-		$product->set_image_id( array_shift( $attachment_ids ) );
-		if ( $attachment_ids ) {
-			$product->set_gallery_image_ids( $attachment_ids );
-		}
+		update_post_meta( $pid, self::META_IMAGE_MAP, wp_json_encode( $new ) );
 		$product->save();
 	}
 
