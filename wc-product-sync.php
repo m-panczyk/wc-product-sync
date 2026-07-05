@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.9
+ * Version:           0.9.10
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -310,6 +310,16 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 		if ( false !== $lock ) {
 			$this->log( 'info', sprintf( 'Sync lock active (%ds ago) — deferring resume.', time() - $lock ) );
 			return;
+		}
+
+		// Resume runs via WP-Cron, often in a web (wp-cron.php) request bound by the default 30s
+		// max_execution_time — image sideloading/resizing (Imagick) easily exceeds it and the batch
+		// dies mid-way. Raise the limit like the initial run does (run_sync).
+		if ( function_exists( 'ignore_user_abort' ) ) {
+			@ignore_user_abort( true );
+		}
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 900 );
 		}
 
 		$total = $progress['total_products'];
