@@ -1,6 +1,49 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.9.5** — next tagged release = 1.0
+Current version: **0.9.9** — next tagged release = 1.0
+
+## Remaining before 1.0 (only these left)
+- **N3** — variation attribute slug vs diacritics: `build_variation_attributes` falls back to
+  `sanitize_title($option)` when `get_term_by('name')` misses; wrong slug (esp. Polish diacritic
+  collisions like Żółty→zolty) → broken/greyed-out variations. Fix: use `ensure_term()` (same path as
+  parent) and read the real `$term->slug`.
+- **N5** — type-change orphans: `ensure_product_type` variable→simple leaves orphaned variations.
+- **N9** — no `register_uninstall_hook`: options/cron/transients/meta orphaned on uninstall.
+- **N10** — no `load_plugin_textdomain` (translations won't load for a private build).
+- **N7 (optional)** — global image dedup by source URL (per-product `_wps_image_map` already exists).
+- `readme.txt`, one PHPCS-WP pass, and a functional `tests/cases/*` suite (only the perf runner exists).
+
+> **Note:** everything below the v0.9.x sections is ARCHIVAL (per-review notes from v0.7–v0.8.x). Where
+> those mark B3 (grouped across batches), images-on-update, #1, N1, N6, B4 etc. as "open/remaining",
+> they are now DONE (see v0.9.x above). The authoritative open list is "Remaining before 1.0" at the top.
+
+## Test/perf rig (built this session — see memory `perf-test-rig`)
+Source=Proxmox `192.168.66.121` (492-product clone + images), target=QNAP `192.168.66.118:18080` (plugin),
+metrics=Telegraf→InfluxDB (`mppcc`/`tests`) + Grafana dashboard `d/wps-perf` with `wps-sync` annotations.
+`tests/perf-run.sh <label> [force_full]` drives a timed sync + annotation + `metrics/perf-history.csv`.
+Benchmarks (492 prod): full+images 892s; incremental no-change **41s** (21.7×); ~20% images changed 104s.
+
+## v0.9.9 — incremental image sync (parent + variation, create AND update)
+Images were create-only, so source image changes never propagated. New `sync_product_images()` keeps a
+per-item map `_wps_image_map` (source image id → local attachment); reuses downloaded, sideloads only
+new/changed, prunes removed. Verified: no-op re-sync = 0 downloads; 1 changed image = only that one.
+
+## v0.9.8 — #1 reset result on cron runs + B3 grouped across batches
+- **#1**: `reset_run_result()` now runs on the first batch in `run_sync_inner` (not only the manual
+  kickoff), so scheduled/cron runs don't inflate the cumulative "Zakończono" counts.
+- **B3**: grouped products handled in a dedicated FINAL pass (`sync_grouped_products`) after every
+  product is synced; children resolve via `source_id_to_local()` (`_wps_source_id`) — batch-independent
+  and works for children WITHOUT a SKU. Verified: SKU + no-SKU child both linked.
+
+## v0.9.7 — fix: image sideload from private/LAN source
+WP SSRF guard (`wp_http_validate_url`) blocked `download_url()` from RFC1918 hosts → products synced
+without images against a LAN/staging source. Fixed via `http_request_host_is_external` for the
+configured source host. (Public HTTPS sources: no-op.)
+
+## v0.9.6 — sync variations on update + gate fields only on update
+- Variable variations now re-sync on UPDATE (were create-only) via `sync_variations()` in the update path.
+- Field gating (`sync_fields`) applies only on UPDATE now (`writing_update` flag); CREATE imports all —
+  matches the "don't overwrite my local edits" intent. Verified: create imports all, update preserves.
 
 ## v0.9.5 — merge soft-delete toggle into a single deletion-mode selector
 Owner: skoro jest tryb usuwania, osobny checkbox soft-delete jest zbędny.
