@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.10
+ * Version:           0.9.11
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -157,13 +157,14 @@ final class WC_Product_Sync {
 	 *  Progress tracking (batching + resume)
 	 * ================================================================== */
 
-private function save_sync_progress( $current_page, $products_processed, $total_products ) {
+private function save_sync_progress( $current_page, $products_processed, $total_products, $page_offset = 0 ) {
 		// Preserve the original start time across page/batch saves so the admin UI's
 		// elapsed-time and ETA reflect the whole sync, not just since the last page.
 		$existing   = get_transient( self::SYNC_PROGRESS_TRANSIENT );
 		$started_at = ( is_array( $existing ) && ! empty( $existing['started_at'] ) ) ? (int) $existing['started_at'] : time();
 		set_transient( self::SYNC_PROGRESS_TRANSIENT, array(
 			'current_page'     => $current_page,
+			'page_offset'      => (int) $page_offset,       // Items already done on the IN-PROGRESS page (current_page+1)
 			'products_processed' => $products_processed,
 			'total_products'   => $total_products,
 			'total_pages'      => $this->last_total_pages, // Store for resume calculations
@@ -184,6 +185,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 	private function seed_sync_progress() {
 		set_transient( self::SYNC_PROGRESS_TRANSIENT, array(
 			'current_page'       => 0,
+			'page_offset'        => 0,
 			'products_processed' => 0,
 			'total_products'     => 0,
 			'total_pages'        => 0,
@@ -401,6 +403,7 @@ $defaults = array(
 		'consumer_secret'     => '',
 		'per_page'            => 100,
 		'sync_batch_limit'    => 200, // 0 = no limit (legacy), recommended: 200-500 products
+		'max_batch_seconds'   => 20,  // time budget per batch — stop+resume before any PHP timeout (0 = off)
 		'schedule_enabled'    => 0,
 		'deletion_mode'       => 'none',  // 'none' = nie ruszaj; 'soft' = szkic+tag; 'hard' = trwałe usunięcie
 		'soft_delete_limit'   => 50,
@@ -525,6 +528,9 @@ $defaults = array(
 		}
 		if ( isset( $input['sync_batch_limit'] ) ) {
 			$out['sync_batch_limit'] = max( 0, (int) $input['sync_batch_limit'] ); // 0 = unlimited (legacy)
+		}
+		if ( isset( $input['max_batch_seconds'] ) ) {
+			$out['max_batch_seconds'] = max( 0, min( 600, (int) $input['max_batch_seconds'] ) );
 		}
 		// Checkboxes: an unchecked box is absent from $input, so these must be set
 		// unconditionally (no isset guard) — otherwise they can never be turned OFF.
@@ -759,6 +765,12 @@ $defaults = array(
 					<td><input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[sync_batch_limit]" id="wps_blim" type="number" min="0" class="small-text"
 						value="<?php echo esc_attr( $opts['sync_batch_limit'] ); ?>" />
 <p class="description"><?php esc_html_e( 'Liczba produktów przetwarzana w jednym batchu przez WP-Cron. Sync kontynuuje automatycznie po zakończeniu każdego batcha (co 30s). 0 = bez limitu.', 'wc-product-sync' ); ?></p></td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="wps_mbs"><?php esc_html_e( 'Limit czasu batcha (s)', 'wc-product-sync' ); ?></label></th>
+					<td><input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[max_batch_seconds]" id="wps_mbs" type="number" min="0" max="600" class="small-text"
+						value="<?php echo esc_attr( $opts['max_batch_seconds'] ?? 20 ); ?>" />
+<p class="description"><?php esc_html_e( 'Batch zatrzymuje się i wznawia po tylu sekundach — zabezpiecza przed timeoutem PHP (postęp zapisywany co produkt, wznowienie od dokładnej pozycji). Ustaw poniżej limitu hosta (zwykle 30 s → 20 s). 0 = bez limitu czasu.', 'wc-product-sync' ); ?></p></td>
 				</tr>
 				<?php
 				$wps_checkbox_group = function ( $field, $choices, $selected ) {
@@ -1203,7 +1215,12 @@ $defaults = array(
 		// First batch of a fresh run? A seeded "starting" transient has current_page=0, so an
 		// absent progress OR current_page<1 both mean "first pass" — the only time force_full and
 		// (single-pass) soft-delete may run. A real resume has current_page>=1.
-		$is_first_batch = empty( $progress ) || (int) ( $progress['current_page'] ?? 0 ) < 1;
+		// First batch of a fresh run only when there's no prior page AND no mid-page offset. A
+		// mid-page-1 resume saves current_page=0 with page_offset>0 — it must NOT be treated as
+		// "first batch" (which would reset the result/report/keys and, with force_full, re-delete
+		// products on every resume).
+		$is_first_batch = empty( $progress )
+			|| ( (int) ( $progress['current_page'] ?? 0 ) < 1 && (int) ( $progress['page_offset'] ?? 0 ) < 1 );
 
 		// Fresh run: start collecting source keys + the per-item report from scratch, and reset
 		// the cumulative result (#1 — needed for scheduled/cron runs, which never hit the manual
@@ -1245,6 +1262,11 @@ $defaults = array(
 		$batch_limit = (int) $this->get_options()['sync_batch_limit']; // 0 = unlimited
 		$page = $progress ? $progress['current_page'] + 1 : 1; // Resume from NEXT page (current already processed)
 		$products_processed = $progress ? $progress['products_processed'] : 0;
+		$resume_offset      = $progress ? (int) ( $progress['page_offset'] ?? 0 ) : 0; // items already done on the in-progress page
+		$first_page         = true;   // Apply resume_offset only to the first page fetched in THIS batch
+		// Time budget: stop+resume before any PHP timeout. Dry runs process everything in one pass.
+		$max_secs           = (int) $this->get_options()['max_batch_seconds'];
+		$deadline           = ( $dry_run || $max_secs < 1 ) ? PHP_FLOAT_MAX : microtime( true ) + $max_secs;
 		$pages_fetched      = 0;      // Track successful pages in this run
 		$fetch_had_error    = false;  // Track if we hit a fetch error during THIS run
 
@@ -1322,7 +1344,20 @@ $defaults = array(
 			$total_counted += $count;
 			$this->log( 'info', sprintf( 'Strona %d/%d (%d produktów)', $page, $total_pages ?: '?', $count ) );
 
+			// Exact total for progress % (bar reaches 100%); fallback overcounts last partial page.
+			$true_total = $this->last_total_items > 0
+				? $this->last_total_items
+				: ( $total_pages > 0 ? $total_pages * $per_page : $total_counted );
+
+			// On a resumed batch, skip items already processed on this (in-progress) page.
+			$skip = $first_page ? min( $resume_offset, $count ) : 0;
+			$first_page = false;
+			$idx  = 0;
+			$stop = false;
 			foreach ( $batch as $p ) {
+				if ( $idx < $skip ) { $idx++; continue; } // already done in an earlier batch
+				$idx++;
+
 				// Dedup by source ID or parent_id for variations/grouped children (Codex R3 fix)
 				$dedup_key = ! empty( $p['parent_id'] ) ? (int) $p['parent_id'] : (int) ( $p['id'] ?? 0 );
 				if ( $dedup_key && empty( $seen_source_ids[ $dedup_key ] ) ) {
@@ -1349,34 +1384,40 @@ $defaults = array(
 					continue;
 				}
 				$this->process_single_product( $p, $dry_run, $stats );
+
+				// Time-box + batch-limit at ITEM granularity (real runs). Save progress and stop+resume
+				// BEFORE any PHP timeout, so no batch is ever killed and progress always advances.
+				if ( ! $dry_run ) {
+					$over = ( microtime( true ) >= $deadline )
+						|| ( $batch_limit > 0 && ( $products_processed - $batch_start_count ) >= $batch_limit );
+					if ( $over ) {
+						if ( $idx >= $count ) {
+							$this->save_sync_progress( $page, $products_processed, $true_total, 0 );      // page finished
+						} else {
+							$this->save_sync_progress( $page - 1, $products_processed, $true_total, $idx ); // mid-page (offset)
+						}
+						$still_batching  = true;
+						$hit_batch_limit = true; // handled after the loop: keep progress, resume scheduled
+						if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
+							wp_clear_scheduled_hook( self::RESUME_HOOK );
+						}
+						wp_schedule_single_event( time() + 30, self::RESUME_HOOK );
+						$this->log( 'info', sprintf( 'Batch zatrzymany (strona %d, poz %d/%d, %d prod.) — wznowienie zaplanowane.',
+							$page, $idx, $count, $products_processed - $batch_start_count ) );
+						$stop = true;
+						break;
+					}
+				}
 			}
 
 			unset( $batch );
+			if ( $stop ) {
+				break; // exit the page loop; grouped handled in the final pass, key accumulation below
+			}
 
-			// Progress persistence + batching apply to REAL runs only. A dry run must never
-			// save progress or schedule a resume, otherwise "Symulacja (dry run)" would arm a
-			// real, writing sync via the resume hook. Dry runs process every page in one pass.
+			// Page fully processed within the time budget → page-boundary save (offset 0), advance.
 			if ( ! $dry_run ) {
-				// Progress saved only at page boundaries (Codex #2 fix: no mid-page saves).
-				// Prefer the exact X-WP-Total count so the progress bar can reach 100%;
-				// fall back to total_pages × per_page (overcounts the last partial page).
-				$true_total = $this->last_total_items > 0
-					? $this->last_total_items
-					: ( $total_pages > 0 ? $total_pages * $per_page : $total_counted );
-				$this->save_sync_progress( $page, $products_processed, $true_total );
-
-				// Batch limit check AFTER completing the page (Codex #3 fix: process-before-check).
-				if ( $batch_limit > 0 && ($products_processed - $batch_start_count) >= $batch_limit ) {
-					$still_batching = true;
-					$this->log( 'info', sprintf( 'Limit batchu (%d produktów) osiągnięty po stronie %d — harmonogramowanie wznowienia.', $batch_limit, $page ) );
-
-					if ( wp_next_scheduled( self::RESUME_HOOK ) ) {
-						wp_clear_scheduled_hook( self::RESUME_HOOK );
-					}
-					wp_schedule_single_event( time() + 30, self::RESUME_HOOK ); // 30s buffer
-					$hit_batch_limit = true; // Handled after the loop: keep progress, resume scheduled
-					break; // Stop fetching pages; grouped are handled in the final pass
-				}
+				$this->save_sync_progress( $page, $products_processed, $true_total, 0 );
 			}
 
 		$page++;
@@ -1391,7 +1432,7 @@ $defaults = array(
 
 		// Stopped at the batch limit — progress preserved, resume already scheduled.
 		if ( $hit_batch_limit ) {
-			$this->log( 'info', 'Limit batchu osiągnięty — pozostawiam postęp do kontynuacji.' );
+			$this->log( 'info', 'Batch zatrzymany (limit czasu/produktów) — postęp zapisany, wznowienie w toku.' );
 			return $stats;
 		}
 
