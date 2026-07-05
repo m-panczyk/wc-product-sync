@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.11
+ * Version:           0.9.12
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -2070,10 +2070,10 @@ $defaults = array(
 				$option = $a['option'] ?? '';
 				$term   = get_term_by( 'name', $option, $map['taxonomy'] );
 				if ( ( ! $term || is_wp_error( $term ) ) && '' !== trim( (string) $option ) ) {
-					// Term not found — create/fetch it via ensure_term() so it gets WP's proper
-					// slug. Falling back to sanitize_title() here mangles Polish diacritics
-					// (Żółty → zolty) and produces a slug that never matches the real term,
-					// silently dropping the variation's attribute value.
+					// Term not found on target — create it via ensure_term() so the slug we
+					// store actually points at a real term. The old fallback emitted a bare
+					// sanitize_title() slug (Żółty → zolty) without creating the term, leaving
+					// a dangling reference that silently dropped the variation's attribute value.
 					$tid  = $this->ensure_term( $map['taxonomy'], $option );
 					$term = $tid ? get_term( $tid, $map['taxonomy'] ) : null;
 				}

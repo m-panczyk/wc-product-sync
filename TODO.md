@@ -1,17 +1,20 @@
 # wc-product-sync — Fix TODO (for AI agent)
 
-Current version: **0.9.11** — next tagged release = 1.0
+Current version: **0.9.12** — next tagged release = 1.0
 
 ## Remaining before 1.0 (only these left)
-- **N3** — variation attribute slug vs diacritics: `build_variation_attributes` falls back to
-  `sanitize_title($option)` when `get_term_by('name')` misses; wrong slug (esp. Polish diacritic
-  collisions like Żółty→zolty) → broken/greyed-out variations. Fix: use `ensure_term()` (same path as
-  parent) and read the real `$term->slug`.
-- **N5** — type-change orphans: `ensure_product_type` variable→simple leaves orphaned variations.
-- **N9** — no `register_uninstall_hook`: options/cron/transients/meta orphaned on uninstall.
-- **N10** — no `load_plugin_textdomain` (translations won't load for a private build).
-- **N7 (optional)** — global image dedup by source URL (per-product `_wps_image_map` already exists).
-- `readme.txt`, one PHPCS-WP pass, and a functional `tests/cases/*` suite (only the perf runner exists).
+
+### DONE in v0.9.12 (committed 2e7ab38)
+- **N3** — FIXED: `build_variation_attributes` now uses `ensure_term()` → `$term->slug` instead of `sanitize_title()`. Polish diacritic collisions resolved.
+- **N5** — FIXED: `ensure_product_type()` now deletes orphaned children before type change.
+- **N9** — FIXED: `register_uninstall_hook()` with static `uninstall()` method added.
+- **N10** — FIXED: `load_textdomain()` action on init hook added.
+
+### Still open
+- **N7 (optional)** — global image dedup by source URL (per-product `_wps_image_map` already exists). Low priority, nice-to-have.
+- `readme.txt` — plugin repository metadata file. Not blocking.
+- PHPCS-WP pass — WordPress coding standards linting. Not blocking.
+- Functional test suite (`tests/cases/*`) — requires staging environment.
 
 > **Note:** everything below the v0.9.x sections is ARCHIVAL (per-review notes from v0.7–v0.8.x). Where
 > those mark B3 (grouped across batches), images-on-update, #1, N1, N6, B4 etc. as "open/remaining",
