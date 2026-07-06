@@ -8,48 +8,37 @@
 
 ---
 
-## PAST ROUND — v0.9.11/v0.9.12 (commits 7576887 + 2e7ab38)
+## PAST ROUNDS
 
-Issues resolved: SQL injection ($wpdb->prepare), N3 diacritics, N5 orphaned variations, N9 uninstall hook, N10 textdomain.
-All done in Round 1. No further iteration needed.
+### Round 1 — Security (commit 7576887)
+- SQL injection: `$wpdb->prepare()` for `META_SYNCED` constant in force-full query
 
----
+### Round 2 — Fixes v0.9.12 (commit 2e7ab38)
+- N3: Diacritics fallback for `_wps_source_id` matching
+- N5: Orphaned variation handling
+- N9: Missing uninstall hook
+- N10: Textdomain loader
 
-## ROUND 3 — Performance & correctness fixes (v0.9.13)
-
-### Issues identified for this round:
-| ID | Description | Lines | Priority | Status |
-|----|-------------|-------|----------|--------|
-| P1 | Variable product `WC_Product_Variable::sync()` called on UPDATE path unnecessarily → redundant term/price rebuild | ~1798 | HIGH | DONE |
-| P2 | `$source_keys` accumulation has no memory cap (OOM risk on large catalogs) | 303-309 | MEDIUM | DONE |
-| P4 | `@set_time_limit()` failure silently swallowed — sync may die without explanation | 336,1053,1198 | LOW | DONE |
-
-### Skipped:
-- P3 [MEDIUM]: Grouped product redundant API re-fetch — verified NOT a bug (children resolved via local DB lookups)
-- N7: global image dedup by source URL (cross-product) — nice-to-have only
-- readme.txt: plugin repo metadata — not code
+### Round 3 — Performance v0.9.13 (commit 18de28f)
+- P1: Removed redundant `WC_Product_Variable::sync()` from UPDATE path
+- P2: Added source keys cap (20k max) in accumulate_source_keys()
+- P4: Fixed `@set_time_limit()` error swallowing in all 3 locations
 
 ---
 
-### ROUND 3 Results (commit TBD)
+## ROUND 4 — Codex Full Code Review Results
 
-**P1 — WC_Product_Variable::sync() removed from UPDATE path:**
-- Before: both update_existing_product() and create_new_product() called WC_Product_Variable::sync($id) after sync_variations()
-- After: only create_new_product() calls it. On UPDATE, individual variation updates from sync_variations() are sufficient since the parent product type already exists — no need to recompute min/max prices or rebuild variation term caches.
-- Impact: Reduces variable product update cycle from ~100+ DB writes (sync + term rebuild) to ~50 (just variations). Significant performance improvement for stores with many variable products.
+### Run details:
+- Tool: `codex exec review` with comprehensive review prompt (security, correctness, performance, WP/WC standards)
+- Directory: `/home/seth/Projekty/wpwc-prod-sync` (real path to avoid symlink sandbox issues)
+- Result: Found 2 P1/blocker issues
 
-**P2 — Source keys memory cap:**
-- Before: $c['keys'] grew unbounded across batches, no upper limit on transient size
-- After: Cap at 20000 keys (self::REPORT_BUCKET_CAP × 40). When exceeded, truncates to first N keys via array_flip/slice. Exact count preserved in $c['count']. Logs warning when cap hit.
-- Impact: Prevents OOM and transient overflow on catalogs with 10k+ products. Max serialized size ~400KB.
+### P1 [CRITICAL] — Force-full sync deletes BEFORE validating source availability
+- File: wc-product-sync.php, lines ~1408-1435
+- Problem: When `force_full_sync` is enabled, the code first fetches source attributes/products API endpoints, BUT if ANY of those requests fail AFTER products have been deleted, the local catalog is already wiped with no recovery. The current order: (1) delete all locally synced products → (2) fetch source attributes → (3) fetch source products. If step 2 or 3 fails, sync aborts but data is gone.
+- Fix: Move the destructive delete block to AFTER successful source fetches complete. Or better: stage the deletions and only commit them if ALL prerequisite API calls succeed.
 
-**P4 — set_time_limit() error logging:**
-- Before: `if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 900 ); }` swallowed all errors
-- After: `if ( function_exists( 'set_time_limit' ) && ! @set_time_limit( 900 ) ) { $this->log('warning', '...') }`
-- Found and fixed 3 occurrences (lines 336, 1053, 1198 — not 2 as initially estimated)
-- Impact: Admins will now see timeout configuration failures in WP logs instead of silent sync crashes.
-
-### Codex Integration Notes
-- Codex analyzed all changes correctly and produced accurate diffs
-- Codex could NOT apply patches due to `/tmp/wpwc-prod-sync` being a symlink (sandbox mount failure)
-- Patched applied manually via patch tool with exact match verification
+### P1 [CRITICAL] — Capped source keys treated as safe for deletion
+- File: wc-product-sync.php, lines ~303-309 (our Round 3 P2 fix)
+- Problem: When `accumulate_source_keys()` truncates keys past the 20k cap, it logs a warning but does NOT set `$c['had_error'] = true`. The downstream delete logic (line ~360 area) checks `$c['had_error']` to decide if the key set is safe for deletion — if false, ALL products not in the key set are considered "missing from source" and get soft/hard deleted. With truncation, valid products get dropped from the key set → FALSE POSITIVE DELETIONS.
+- Fix: Set `$c['had_error'] = true` when keys are truncated past the cap. This marks the collection as incomplete/unsafe for deletion decisions.

@@ -356,11 +356,14 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			}
 		}
 		// Cap key count to prevent transient overflow on large catalogs.
+		// When capped, mark as unsafe for deletion — truncated key set is incomplete
+		// and products dropped from it would be falsely deleted as "missing from source".
 		$cap = self::REPORT_BUCKET_CAP * 40; // 20000 keys (~400KB max serialized)
 		if ( count( $c['keys'] ) > $cap ) {
 			$before = count( $c['keys'] );
 			$c['keys'] = array_flip( array_slice( array_keys( $c['keys'] ), 0, $cap ) );
-			$this->log( 'warning', sprintf( 'Source keys cap reached (%d→%d).', $before, $cap ) );
+			$this->log( 'warning', sprintf( 'Source keys cap reached (%d→%d). Key set incomplete — soft/hard delete SKIPPED for safety.', $before, $cap ) );
+			$c['had_error'] = true; // mark collection unsafe for deletion decisions
 		}
 		$c['count']    += (int) $count;
 		$c['had_error'] = $c['had_error'] || (bool) $had_error;
@@ -1403,26 +1406,10 @@ $defaults = array(
 			}
 		}
 
-		// Pełna synchronizacja – usuń stare lokalne produkty. Only on the first pass.
+		// Pełna synchronizacja – usuń stare lokalne produkty AFTER processing completes.
+		// Only on the first batch AND only when all source fetches succeeded.
+		// This prevents data loss if source API fails after products were deleted.
 		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && $is_first_batch && ! $this->fast_mode;
-		if ( $force_full && ! $dry_run ) {
-			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
-			global $wpdb;
-			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
-			$ids = array_unique( array_map( 'absint', $ids ) );
-			if ( ! empty( $ids ) ) {
-				foreach ( $ids as $pid ) {
-					$p = wc_get_product( $pid );
-					if ( $p ) {
-						$p->delete( true );
-						$this->log( 'info', sprintf( 'Usunięto lokalny produkt ID=%d (full sync)', $pid ) );
-					} else {
-						wp_delete_post( $pid, true );
-					}
-				}
-				$this->log( 'info', sprintf( 'Usunięto %d lokalnych produktów.', count( $ids ) ) );
-			}
-		}
 
 		$this->attr_map_cache   = array();
 		$this->source_id_to_sku = array();
@@ -1643,6 +1630,28 @@ $defaults = array(
 		// so a field-refresh has nothing to do for them.
 		if ( ! $this->fast_mode ) {
 			$this->sync_grouped_products( $dry_run, $stats );
+		}
+
+		// Force-full sync: wipe all locally synced products BEFORE soft-delete cleanup.
+		// Only runs after ALL source fetches completed without errors — if we got here
+		// with force_full=true, we know the product list is complete and accurate.
+		if ( $force_full && ! $dry_run && ! $this->fetch_had_error ) {
+			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
+			global $wpdb;
+			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
+			$ids = array_unique( array_map( 'absint', $ids ) );
+			if ( ! empty( $ids ) ) {
+				foreach ( $ids as $pid ) {
+					$p = wc_get_product( $pid );
+					if ( $p ) {
+						$p->delete( true );
+						$this->log( 'info', sprintf( 'Usunięto lokalny produkt ID=%d (full sync)', $pid ) );
+					} else {
+						wp_delete_post( $pid, true );
+					}
+				}
+				$this->log( 'info', sprintf( 'Usunięto %d lokalnych produktów.', count( $ids ) ) );
+			}
 		}
 
 		// Handle products removed from source (soft/hard per deletion_mode). We only reach here
