@@ -51,6 +51,28 @@ drive() {
   echo "$n"
 }
 
+# --- Monitoring emission (best-effort; never fails the test) --------------------------------------
+# Metric → InfluxDB (same bucket/org as perf-run.sh) so a dashboard panel + alert can watch parity.
+emit_influx() { # mode verdict checked mismatch mutated batches dur_s
+  [ -n "${INFLUX:-}" ] && [ -n "${INFLUX_TOKEN:-}" ] || return 0
+  local fail=0; [ "$2" = "PASS" ] || fail=1   # numeric health flag the Grafana alert watches
+  local ln="wps_price_check,mode=$1,verdict=$2 checked=${3}i,mismatch=${4}i,mutated=${5}i,batches=${6}i,duration=${7}i,fail=${fail}i"
+  curl -s --max-time 10 -o /dev/null -w "influx write http=%{http_code}\n" \
+    -XPOST "$INFLUX/api/v2/write?org=$INFLUX_ORG&bucket=tests&precision=s" \
+    -H "Authorization: Token $INFLUX_TOKEN" --data-binary "$ln $(date +%s)" || true
+}
+# Region annotation → Grafana, on the same time axis as the host metrics.
+emit_annotation() { # verdict text start_ms end_ms
+  [ -n "${GRAFANA:-}" ] && [ -n "${GRAFANA_TOKEN:-}" ] || return 0
+  curl -s --max-time 10 -o /dev/null -w "grafana annotation http=%{http_code}\n" \
+    -H "Authorization: Bearer $GRAFANA_TOKEN" -H "Content-Type: application/json" \
+    -X POST "$GRAFANA/api/annotations" \
+    -d "{\"time\":$3,\"timeEnd\":$4,\"tags\":[\"wps-price\",\"$1\"],\"text\":\"$2\"}" || true
+}
+
+# Coerce to a base-10 integer for InfluxDB line protocol (empty/'?'/non-numeric → fallback).
+intval() { case "$1" in ''|*[!0-9-]*) echo "$2";; *) echo "$1";; esac; }
+
 # Compares EVERY source simple product's regular_price against the matched target product.
 # Runs entirely on the TARGET: it pulls source prices over the (read-only) REST API and compares
 # to the local synced products. Prints "PARITY checked=N mismatch=M" + one line per mismatch.
@@ -80,6 +102,7 @@ echo "PARITY checked=$checked mismatch=$mismatch\n".$lines;
 '
 
 TS="$(date -u +%FT%TZ)"
+START_MS=$(date +%s%3N); START_S=$(date +%s)
 
 if [ "$MODE" = "full" ]; then
   ensure_src_up
@@ -87,8 +110,16 @@ if [ "$MODE" = "full" ]; then
   B=$(drive run_sync_cron)
   read -r C U S E < <(teval '$r=get_option("wps_last_sync_result");printf("%d %d %d %d",$r["created"]??0,$r["updated"]??0,$r["skipped"]??0,$r["errors"]??0);' 2>/dev/null)
   echo "full: created=$C updated=$U skipped=$S errors=$E ($B batches)"
-  RES=$(teval "$PARITY_PHP")
-  echo "$RES" | head -1
+  RES=$(teval "$PARITY_PHP"); SUMMARY=$(echo "$RES" | grep '^PARITY' | head -1)
+  CHECKED=$(intval "$(sed -n 's/.*checked=\([0-9-]*\).*/\1/p' <<<"$SUMMARY")" 0)
+  MISMATCH=$(intval "$(sed -n 's/.*mismatch=\([0-9-]*\).*/\1/p' <<<"$SUMMARY")" -1)
+  echo "$RES" | grep MISMATCH | head -20
+  END_MS=$(date +%s%3N)
+  VERDICT="PASS"; { [ "$MISMATCH" = "0" ] && [ "$(intval "$E" 1)" = "0" ]; } || VERDICT="FAIL"
+  emit_influx full "$VERDICT" "$CHECKED" "$MISMATCH" 0 "$(intval "$B" 0)" "$(( $(date +%s) - START_S ))"
+  emit_annotation "$VERDICT" "wps-price FULL [$VERDICT]: checked=$CHECKED mismatch=$MISMATCH, upd=$U err=$E" "$START_MS" "$END_MS"
+  echo "== $VERDICT (full) — checked=$CHECKED mismatch=$MISMATCH =="
+  [ "$VERDICT" = "PASS" ] || exit 1
   exit 0
 fi
 
@@ -134,9 +165,16 @@ CHECKED=$(sed -n 's/.*checked=\([0-9-]*\).*/\1/p' <<<"$SUMMARY")
 MISMATCH=$(sed -n 's/.*mismatch=\([0-9-]*\).*/\1/p' <<<"$SUMMARY")
 echo "$RES" | grep MISMATCH | head -20
 
-VERDICT="PASS"; [ "${MISMATCH:-1}" = "0" ] || VERDICT="FAIL"
+CHECKED=$(intval "$CHECKED" 0); MISMATCH=$(intval "$MISMATCH" -1)
+VERDICT="PASS"; [ "$MISMATCH" = "0" ] || VERDICT="FAIL"
+END_MS=$(date +%s%3N)
 [ -f "$CHECK" ] || echo "ts,mutated,batches,fast_created,checked,mismatch,verdict" > "$CHECK"
-echo "$TS,$NCHG,$B,$C,${CHECKED:-?},${MISMATCH:-?},$VERDICT" >> "$CHECK"
-echo "== $VERDICT — checked=${CHECKED:-?} mismatch=${MISMATCH:-?} (history: $(basename "$HIST"), log: $(basename "$CHECK")) =="
+echo "$TS,$NCHG,$B,$C,$CHECKED,$MISMATCH,$VERDICT" >> "$CHECK"
+
+# 4) Monitoring: metric to InfluxDB + region annotation to Grafana (alert watches these).
+emit_influx tick "$VERDICT" "$CHECKED" "$MISMATCH" "$NCHG" "$(intval "$B" 0)" "$(( $(date +%s) - START_S ))"
+emit_annotation "$VERDICT" "wps-price TICK [$VERDICT]: mut=$NCHG checked=$CHECKED mismatch=$MISMATCH" "$START_MS" "$END_MS"
+
+echo "== $VERDICT — checked=$CHECKED mismatch=$MISMATCH (history: $(basename "$HIST"), log: $(basename "$CHECK")) =="
 
 [ "$VERDICT" = "PASS" ] || exit 1
