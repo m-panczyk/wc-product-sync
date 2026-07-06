@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.14
+ * Version:           0.9.15
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -2018,8 +2018,10 @@ $defaults = array(
 		// (wc_product_meta_lookup min/max price + stock status). A variation added, removed,
 		// or a price/stock change on an existing one all invalidate the parent's rollup.
 		$rollup_dirty = false;
-		// Props whose change must propagate to the parent's price/stock rollup.
-		$rollup_props = array( 'regular_price', 'sale_price', 'price', 'date_on_sale_from', 'date_on_sale_to', 'stock_quantity', 'stock_status', 'manage_stock' );
+		// Props whose change must propagate to the parent's price/stock rollup. 'status' is
+		// included because WC's sync_price query only counts publish variations — a publish<->
+		// private (or draft) flip changes which children feed the parent min/max price.
+		$rollup_props = array( 'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_to', 'stock_quantity', 'stock_status', 'manage_stock', 'status' );
 
 		$kept = array();
 		foreach ( $source_vars as $sv ) {

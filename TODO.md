@@ -1,4 +1,4 @@
-# WC Product Sync — TODO (current: v0.9.14 → next tagged = 1.0)
+# WC Product Sync — TODO (current: v0.9.15 → next tagged = 1.0)
 
 ## ✅ Completed
 
@@ -35,7 +35,22 @@
 
 ---
 
-## v0.9.14+ — Remaining open items
+## ✅ Completed (v0.9.15)
+
+- P1-followup: `sync_variations()` rollup detection missed variation **status** changes. WC's
+  `sync_price` query only counts `publish` variations, so a source variation flipped
+  publish↔private (or draft) changes which children feed the parent min/max price — but the
+  v0.9.14 `$rollup_props` allowlist omitted `status`, leaving `wc_product_meta_lookup` stale.
+  Added `status` to `$rollup_props` (and dropped the dead `price` entry — it's a save-time-derived
+  prop, never present in `get_changes()` beforehand). Surfaced by `/code-review`.
+  Verified source-driven E2E on rig: flipped source var 6689 (price 2900) → private, real plugin
+  sync → target parent 4088 max_price rolled 2900→350; reverted cleanly back to 2900. 492/492,
+  0 errors, ~40s each run (fast path intact).
+- Version header bumped 0.9.14 → 0.9.15 (deployed to QNAP target).
+
+---
+
+## v0.9.15+ — Remaining open items
 
 ### Known limitation (from P2):
 - Source keys cap (20k) interacts with soft-delete: on catalogs >20k with soft-delete enabled,
