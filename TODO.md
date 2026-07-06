@@ -1,4 +1,4 @@
-# WC Product Sync — TODO (v0.9.12 → v0.9.13)
+# WC Product Sync — TODO (current: v0.9.14 → next tagged = 1.0)
 
 ## ✅ Completed
 
@@ -6,23 +6,42 @@
 - N1: SQL injection in force-full query — `$wpdb->prepare()` for `META_SYNCED` constant (#38)
 
 ### Fixes (v0.9.12, commit 2e7ab38)
-- N3: Diacritics fallback for `_wps_source_id` matching when SKU is not set (#44)
+- N3: Variation attribute diacritics — `build_variation_attributes()` now calls `ensure_term()` (creating the missing term so the stored slug resolves) instead of emitting a bare `sanitize_title()` slug that dangled (#44)
 - N5: Orphaned variation handling — detect and remove type-changed variations that no longer match any source child (#110)
 - N9: Missing `WC_Product_Sync::uninstall()` hook + wp_clear_scheduled_hook cleanup on uninstall (#129)
 - N10: Textdomain loader (`load_plugin_textdomain`) added at `init` action (#92)
 
 ---
 
-## ✅ Completed (v0.9.13 — Round 3)
+## ✅ Completed (v0.9.13 — Round 3, commit 18de28f)
 
 ### Performance & correctness (Round 3)
-- P1: Removed redundant `WC_Product_Variable::sync()` from UPDATE path → variable product updates now only call sync_variations() instead of also rebuilding term/price caches
+- P1: Removed `WC_Product_Variable::sync()` from UPDATE path (perf) — **partially reverted in v0.9.14, see below**
 - P2: Added source keys cap (20k max) to accumulate_source_keys() — prevents OOM on large catalogs
 - P4: Added error logging for `@set_time_limit()` failures in all 3 locations (was silently swallowing errors)
 
 ---
 
+## ✅ Completed (v0.9.14, commit 7a70495)
+
+- P1-fix: Unconditionally dropping the parent rollup (v0.9.13) left `wc_product_meta_lookup`
+  min/max_price stale when a variation's price/stock changed → wrong catalog sort-by-price and
+  broken price-filter widget for variable products (display range was fine; lookup table was not).
+  `sync_variations()` now returns whether a rollup-relevant change occurred (variation
+  added/removed, or a `regular_price`/`sale_price`/`stock_*` change via `get_changes()`), and the
+  UPDATE path calls `WC_Product_Variable::sync()` only then. Keeps the v0.9.13 perf win on no-op
+  updates. Verified on rig end-to-end (MAT-108 35→3035 rolled up correctly; 492/492, ~40s).
+- Version header bumped 0.9.13 → 0.9.14 (deployed to QNAP target).
+
+---
+
 ## v0.9.14+ — Remaining open items
+
+### Known limitation (from P2):
+- Source keys cap (20k) interacts with soft-delete: on catalogs >20k with soft-delete enabled,
+  products beyond the cap look "absent from source" and could be soft-deleted. Per-run deletion
+  safety cap limits blast radius. Add a code comment noting this; revisit if >20k catalogs are
+  a real target (e.g. raise cap or exempt soft-delete from the cap).
 
 ### Nice-to-have / optional:
 - N7: Global image dedup by source URL (cross-product) — reduce duplicate attachments when multiple products share images
