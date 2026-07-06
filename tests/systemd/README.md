@@ -51,11 +51,11 @@ The perf dashboard (`grafana-dashboard.json`, uid `wps-perf`) has two parity pan
 `wps-price` annotation overlay. To apply the updated dashboard to live Grafana:
 
 ```sh
-cd tests && source ./perf.env
-python3 -c 'import json;d=json.load(open("grafana-dashboard.json"));x=d["dashboard"];x.pop("id",None);json.dump({"dashboard":x,"overwrite":True},open("/tmp/di.json","w"))'
-curl -H "Authorization: Bearer $GRAFANA_TOKEN" -H "Content-Type: application/json" \
-  -X POST "$GRAFANA/api/dashboards/db" --data-binary @/tmp/di.json
+tests/apply-dashboard.sh
 ```
+
+(Self-contained bash — works from any shell, incl. fish. Do NOT `source perf.env` directly
+from fish: it's bash syntax and will fail silently.)
 
 No Grafana alert rule is configured — detect a FAIL via `systemctl --user --failed`,
 `metrics/price-check.csv`, or the dashboard's "Ostatni werdykt parytetu" panel.
