@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.17
+ * Version:           0.9.18
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -1189,6 +1189,10 @@ $defaults = array(
 	}
 
 	public function run_sync_cron() {
+		// Authoritative: this is a FULL sync. Reset $fast_mode explicitly — WP-Cron runs all due
+		// hooks in ONE request on this singleton, so a fast event processed earlier in the same
+		// request would otherwise leave $fast_mode=true and silently degrade this run to update-only.
+		$this->fast_mode = false;
 		// Don't hijack an in-flight fast (field-refresh) sync's batched progress in full mode —
 		// let it finish; the daily run will proceed on its next scheduled tick.
 		$prog = $this->get_sync_progress();
@@ -1212,7 +1216,14 @@ $defaults = array(
 		}
 		$this->fast_mode = true;
 		$this->log( 'info', '=== Szybka synchronizacja (aktualizacja istniejących, wybrane pola) ===' );
-		$this->run_sync( false );
+		try {
+			$this->run_sync( false );
+		} finally {
+			// Never leave fast mode set on the singleton: a later hook (e.g. the daily CRON_HOOK) in
+			// the same WP-Cron request must not inherit it. run_resume_batch re-derives mode from the
+			// saved progress, so clearing here is safe for multi-batch fast runs.
+			$this->fast_mode = false;
+		}
 	}
 
 	/* =====================================================================

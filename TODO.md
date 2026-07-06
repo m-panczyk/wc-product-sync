@@ -1,4 +1,4 @@
-# WC Product Sync — TODO (current: v0.9.17 → next tagged = 1.0)
+# WC Product Sync — TODO (current: v0.9.18 → next tagged = 1.0)
 
 ## ✅ Completed
 
@@ -91,7 +91,22 @@
 
 ---
 
-## v0.9.17+ — Remaining open items
+## ✅ Completed (v0.9.18)
+
+- **Fix: `$fast_mode` leaked across WP-Cron hooks in one request.** WP-Cron runs all due hooks in a
+  single request on the singleton; `run_fast_sync_cron` set `$fast_mode=true` but never reset it, so
+  if the hourly fast event ran before the daily `CRON_HOOK` in the same request, the daily FULL sync
+  inherited fast mode and silently degraded to update-only (no create/delete, no images/desc/etc.).
+  Common on low-traffic sites (both events overdue → one wp-cron.php run). Fix: `run_sync_cron` now
+  sets `$fast_mode=false` authoritatively before running, and `run_fast_sync_cron` resets it in a
+  `finally` (`run_resume_batch` re-derives mode from saved progress, so multi-batch fast runs are
+  unaffected). Surfaced by `/code-review`. Verified on rig via reflection (leaked true → false at both
+  entry points) + green price/stock parity ticks.
+- Version header bumped 0.9.17 → 0.9.18.
+
+---
+
+## v0.9.18+ — Remaining open items
 
 ### Known limitation (from P2):
 - Source keys cap (20k) interacts with soft-delete: on catalogs >20k with soft-delete enabled,
