@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.13
+ * Version:           0.9.14
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -1794,10 +1794,15 @@ $defaults = array(
 		// #1: re-sync variations on UPDATE too (previously only on create), so variation
 		// price/stock changes and added/removed variations in the source are reflected.
 		if ( 'WC_Product_Variable' === $wanted_class ) {
-			$this->sync_variations( $id, (int) $p['id'] );
-			// WC_Product_Variable::sync() called in create_new_product() only — 
-			// on UPDATE the individual variation updates from sync_variations() 
-			// are sufficient (min/max prices, term cache already correct).
+			// Roll up the parent's aggregates (wc_product_meta_lookup min/max price + stock
+			// status, used for catalog sort-by-price and the price-filter widget) ONLY when a
+			// variation was added/removed or its price/stock changed. Saving individual
+			// variations updates the live display range but NOT the parent lookup row, so this
+			// resync is required for correctness; skipping it when nothing changed keeps the
+			// no-op update fast (the common case).
+			if ( $this->sync_variations( $id, (int) $p['id'] ) ) {
+				WC_Product_Variable::sync( $id );
+			}
 		}
 		$this->mark_synced( $id );
 		$this->log( 'info', sprintf( 'Zaktualizowano %s: %s (ID=%d)', $wanted_term, $p['name'], $id ) );
@@ -2009,6 +2014,13 @@ $defaults = array(
 			$by_sig[ $this->signature( $v->get_attributes() ) ] = $vid;
 		}
 
+		// Track whether anything changed that requires re-rolling the PARENT aggregates
+		// (wc_product_meta_lookup min/max price + stock status). A variation added, removed,
+		// or a price/stock change on an existing one all invalidate the parent's rollup.
+		$rollup_dirty = false;
+		// Props whose change must propagate to the parent's price/stock rollup.
+		$rollup_props = array( 'regular_price', 'sale_price', 'price', 'date_on_sale_from', 'date_on_sale_to', 'stock_quantity', 'stock_status', 'manage_stock' );
+
 		$kept = array();
 		foreach ( $source_vars as $sv ) {
 			try {
@@ -2041,6 +2053,12 @@ $defaults = array(
 				$this->apply_physical( $variation, $sv );
 				$variation->set_attributes( $attrs );
 
+				// New variation, or an existing one whose price/stock changed → parent rollup stale.
+				$changes = $variation->get_changes();
+				if ( ! $is_update || array_intersect_key( $changes, array_flip( $rollup_props ) ) ) {
+					$rollup_dirty = true;
+				}
+
 				$new_vid = $variation->save();
 				// Variation image — incremental, on create AND update (only new/changed downloads).
 				if ( $this->field_on( 'images' ) && ! empty( $sv['image']['src'] ) ) {
@@ -2059,6 +2077,7 @@ $defaults = array(
 					$stale = wc_get_product( $vid );
 					if ( $stale ) {
 						$stale->delete( true );
+						$rollup_dirty = true; // removed a child → parent price/stock rollup stale
 						$this->log( 'info', sprintf( 'Usunięto nieaktualną wariację ID=%d (rodzic %d)', $vid, $target_parent_id ) );
 					}
 				}
@@ -2066,6 +2085,8 @@ $defaults = array(
 		} else {
 			$this->log( 'warning', sprintf( 'Błąd pobierania wariacji rodzica %d – pomijam usuwanie dzieci.', $target_parent_id ) );
 		}
+
+		return $rollup_dirty;
 	}
 
 	private function build_variation_attributes( array $source_attrs ) {
