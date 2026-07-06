@@ -106,13 +106,32 @@
 
 ---
 
+## ✅ Completed (v0.9.19 — Round 4: Codex full code review)
+
+- **P1 [CRITICAL]: Force-full sync delete moved from BEFORE fetches to AFTER processing.**
+  Previously deleted ALL synced local products immediately on first batch, before any API fetching.
+  If source attributes/products endpoint failed afterwards → everything permanently wiped with no recovery.
+  Fix: move deletion block to after grouped product processing + right before soft-delete cleanup,
+  guarded by `! $this->fetch_had_error`. Sync completes its fetch cycle; only then does it remove old
+  products, guaranteeing the source list is validated first.
+
+- **P2 [CRITICAL]: Capped source keys now marked unsafe for deletion.**
+  Our v0.9.13 P2 fix added a 20k key cap to `accumulate_source_keys()` but didn't set `$c['had_error']`
+  when truncation occurred. Downstream delete logic checks `had_error` to decide if the key set is
+  complete — false meant "safe to delete." With truncation, valid products dropped from the capped
+  set would be falsely considered "missing from source" and soft/hard-deleted. Fix: now sets
+  `$c['had_error'] = true` on cap hit, preventing deletion of incomplete key sets. Updated warning log
+  explicitly states deletion is skipped.
+
+- Codex performed a comprehensive `codex exec review` across security, correctness, performance,
+  and WordPress/WC standards — identified these two data-loss risks that manual review had missed.
+
+---
+
 ## v0.9.18+ — Remaining open items
 
-### Known limitation (from P2):
-- Source keys cap (20k) interacts with soft-delete: on catalogs >20k with soft-delete enabled,
-  products beyond the cap look "absent from source" and could be soft-deleted. Per-run deletion
-  safety cap limits blast radius. Add a code comment noting this; revisit if >20k catalogs are
-  a real target (e.g. raise cap or exempt soft-delete from the cap).
+### Resolved:
+- **P2 (source keys cap → false-positive deletion):** Fixed in v0.9.19. Capped keys now set `had_error = true`, blocking safe/unsafe deletion decisions. No more accidental deletion of valid products when catalog > 20k.
 
 ### Nice-to-have / optional:
 - N7: Global image dedup by source URL (cross-product) — reduce duplicate attachments when multiple products share images
