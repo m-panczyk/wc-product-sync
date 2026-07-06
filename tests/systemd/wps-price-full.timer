@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily wc-product-sync full sync at 12:00
+
+[Timer]
+OnCalendar=*-*-* 12:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

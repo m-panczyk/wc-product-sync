@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly wc-product-sync price integrity tick
+
+[Timer]
+# Every hour at :30 (offset from the 12:00 full sync).
+OnCalendar=*-*-* *:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=wc-product-sync full sync (daily 12:00 job, driven externally — QNAP has no wp-cron)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/seth/Projekty/wpwc-prod-sync
+ExecStart=/home/seth/Projekty/wpwc-prod-sync/tests/price-sync-test.sh full

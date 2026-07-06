@@ -1,0 +1,10 @@
+[Unit]
+Description=wc-product-sync price integrity tick (mutate random source prices, fast-sync, verify parity)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/seth/Projekty/wpwc-prod-sync
+Environment=PRICE_TEST_K=5
+ExecStart=/home/seth/Projekty/wpwc-prod-sync/tests/price-sync-test.sh tick
