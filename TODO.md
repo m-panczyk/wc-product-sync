@@ -1,4 +1,4 @@
-# WC Product Sync — TODO (current: v0.9.16 → next tagged = 1.0)
+# WC Product Sync — TODO (current: v0.9.17 → next tagged = 1.0)
 
 ## ✅ Completed
 
@@ -72,7 +72,26 @@
 
 ---
 
-## v0.9.16+ — Remaining open items
+## ✅ Completed (v0.9.17)
+
+- **Auto-refresh admina wyłączony domyślnie:** strona postępu przeładowywała się w całości co 8 s
+  (`location.reload()`), co destabilizowało UI (przeskok scrolla, migotanie). Teraz bramkowane
+  ustawieniem `admin_auto_refresh` (domyślnie OFF) + zawsze dostępny ręczny przycisk „Odśwież postęp".
+- **Test parytetu stanów magazynowych + uogólnienie harnessu:** `tests/price-sync-test.sh` →
+  `tests/sync-parity-test.sh` z parametrem `TEST_FIELD=price|stock`. Nowy timer systemd
+  `wps-stock-tick` (godzinowo @:00) mutuje losowe `stock_quantity` na źródle → szybki sync → parytet
+  `stock_quantity` źródło↔cel; price tick pozostaje @:30, full @12:00 (wspólny lock). `fast_sync_fields`
+  ustawione na `price,stock`. Metryka InfluxDB `wps_price_check` dostała tag `field`; alert łapie oba.
+  Zweryfikowane: stock tick PASS (checked=433, mismatch=0).
+- **Dokumentacja wydajności:** `docs/PERFORMANCE.md` — czasy (492 prod: pełny bez obrazów ~127 s,
+  pierwszy z obrazami ~858–892 s, inkrementalny bez zmian ~40 s, szybki ~40 s), analiza wąskich gardeł
+  (sideload obrazów ≈85 %), mechanizmy (batching/resume, mapa obrazów, szybki sync, rollup na żądanie),
+  strojenie i ograniczenia.
+- Version header bumped 0.9.16 → 0.9.17.
+
+---
+
+## v0.9.17+ — Remaining open items
 
 ### Known limitation (from P2):
 - Source keys cap (20k) interacts with soft-delete: on catalogs >20k with soft-delete enabled,

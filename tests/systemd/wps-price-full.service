@@ -6,4 +6,5 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/home/seth/Projekty/wpwc-prod-sync
-ExecStart=/home/seth/Projekty/wpwc-prod-sync/tests/price-sync-test.sh full
+Environment=TEST_FIELD=price
+ExecStart=/home/seth/Projekty/wpwc-prod-sync/tests/sync-parity-test.sh full

@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.16
+ * Version:           0.9.17
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -490,6 +490,9 @@ $defaults = array(
 		'fast_sync_enabled'      => 0,
 		'fast_sync_interval_min' => 60,                      // minutes (floored to 15 at use)
 		'fast_sync_fields'       => array( 'price', 'stock' ),
+		// Admin progress page: full-page auto-reload while a sync runs. OFF by default — it makes the
+		// UI unstable (scroll jumps/flicker). Manual "Odśwież postęp" button is always available.
+		'admin_auto_refresh'     => 0,
 	);
 		$raw = get_option( self::OPTION_KEY, array() );
 		// Migration: pre-0.9.5 used a separate soft_delete_enabled checkbox. Map it onto
@@ -643,6 +646,7 @@ $defaults = array(
 			$out['fast_sync_interval_min'] = max( 15, min( 1440, (int) $input['fast_sync_interval_min'] ) );
 		}
 		$out['fast_sync_fields'] = $this->sanitize_choice_set( $input['fast_sync_fields'] ?? array(), array( 'price', 'stock' ) );
+		$out['admin_auto_refresh'] = empty( $input['admin_auto_refresh'] ) ? 0 : 1;
 		add_action( 'shutdown', array( $this, 'sync_cron_schedule' ) );
 		return $out;
 	}
@@ -759,10 +763,18 @@ $defaults = array(
 
 			printf( '<p><a href="%s" class="button button-link-danger" onclick="return confirm(\'Anulować synchronizację?\');">Anuluj</a>',
 				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_cancel' ), self::NONCE_ACTION . '_cancel' ) );
+			printf( ' <a href="%s" class="button">%s</a>',
+				esc_url( admin_url( 'admin.php?page=wc-product-sync' ) ),
+				esc_html__( 'Odśwież postęp', 'wc-product-sync' ) );
 			echo '</p>';
-			// Poll for progress while a sync is active. The script is only emitted while the
-			// progress transient exists, so it stops reloading once the sync finishes.
-			echo '<script>setTimeout(function(){ if(!document.hidden){ location.reload(); } }, 8000);</script>';
+			// Progress auto-refresh is OFF by default: a full-page reload every few seconds makes the
+			// admin UI unstable (scroll jumps, lost interaction, flicker). Opt in via the
+			// "Auto-odświeżanie postępu" setting; otherwise use the manual "Odśwież postęp" button above.
+			// The script is only emitted while the progress transient exists, so it stops once the sync
+			// finishes.
+			if ( ! empty( $this->get_options()['admin_auto_refresh'] ) ) {
+				echo '<script>setTimeout(function(){ if(!document.hidden){ location.reload(); } }, 8000);</script>';
+			}
 			echo '</div>';
 		}
 
@@ -784,7 +796,7 @@ $defaults = array(
 				</p></div>
 			<?php elseif ( isset( $_GET['started'] ) ) : ?>
 				<div class="notice notice-info is-dismissible"><p>
-					<?php esc_html_e( 'Synchronizacja uruchomiona w tle. Postęp pojawi się poniżej i będzie się odświeżał automatycznie.', 'wc-product-sync' ); ?>
+					<?php esc_html_e( 'Synchronizacja uruchomiona w tle. Postęp pojawi się poniżej — użyj przycisku „Odśwież postęp", aby zaktualizować (auto-odświeżanie jest wyłączone).', 'wc-product-sync' ); ?>
 				</p></div>
 			<?php elseif ( isset( $_GET['stepped'] ) ) : ?>
 				<div class="notice notice-info is-dismissible"><p>
@@ -961,6 +973,14 @@ $defaults = array(
 								}
 								?>
 							</p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Auto-odświeżanie postępu', 'wc-product-sync' ); ?></th>
+						<td>
+							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[admin_auto_refresh]" value="1"
+								<?php checked( ! empty( $opts['admin_auto_refresh'] ) ); ?> /> <?php esc_html_e( 'Automatycznie przeładowuj tę stronę co 8 s podczas synchronizacji', 'wc-product-sync' ); ?></label>
+							<p class="description"><?php esc_html_e( 'Domyślnie wyłączone — pełne przeładowanie strony destabilizuje UI (przeskok scrolla, migotanie). Zamiast tego użyj przycisku „Odśwież postęp" widocznego w trakcie synchronizacji.', 'wc-product-sync' ); ?></p>
 						</td>
 					</tr>
 					<tr>

@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly wc-product-sync STOCK integrity tick
+
+[Timer]
+# Every hour at :00 (offset 30 min from the price tick at :30; both serialize via a shared lock).
+OnCalendar=*-*-* *:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
