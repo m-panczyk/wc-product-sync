@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.15
+ * Version:           0.9.16
  * Author:            M
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -26,6 +26,8 @@ final class WC_Product_Sync {
 	const OPTION_KEY      = 'wc_product_sync_options';
 	const CRON_HOOK        = 'wc_product_sync_daily_event';
 	const RESUME_HOOK      = 'wps_sync_resume'; // batch continuation via cron
+	const FAST_CRON_HOOK   = 'wc_product_sync_fast_event'; // frequent field-refresh (price/stock)
+	const FAST_SCHEDULE    = 'wps_fast_interval';          // dynamic cron schedule (interval = configured minutes)
 	const LOG_SOURCE       = 'wc-product-sync';
 	const NONCE_ACTION     = 'wc_product_sync_run';
 	const SYNC_LOCK_TRANSIENT  = 'wps_sync_running';
@@ -70,6 +72,9 @@ final class WC_Product_Sync {
 	private $last_skip_reason = '';
 	/** Czy trwa AKTUALIZACJA (true) czy TWORZENIE (false) — pola bramkujemy tylko przy aktualizacji */
 	private $writing_update = false;
+	/** Szybka synchronizacja: tylko wybrane pola (fast_sync_fields), tylko aktualizacja istniejących
+	 *  (bez tworzenia i usuwania). Ustawiane per-przebieg (cron/resume). */
+	private $fast_mode = false;
 	/** Ostatnie nagłówki odpowiedzi REST API (X-WP-TotalPages) */
 	private $last_api_headers = array();
 
@@ -88,6 +93,8 @@ final class WC_Product_Sync {
 		add_action( 'admin_post_wc_product_sync_step', array( $this, 'handle_step_sync' ) );
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
 		add_action( self::RESUME_HOOK, array( $this, 'run_resume_batch' ) );
+		add_action( self::FAST_CRON_HOOK, array( $this, 'run_fast_sync_cron' ) );
+		add_filter( 'cron_schedules', array( $this, 'register_fast_schedule' ) );
 		add_action( 'admin_notices', array( $this, 'maybe_wc_missing_notice' ) );
 		add_action( 'init', array( $this, 'load_textdomain' ) );
 		// Allow image sideloading from the configured source host even if it's a private/LAN
@@ -119,6 +126,11 @@ final class WC_Product_Sync {
 		if ( ! empty( $opts['schedule_enabled'] ) && ! wp_next_scheduled( self::CRON_HOOK ) ) {
 			self::schedule_cron_at_time();
 		}
+		// Fast field-refresh cron uses a dynamic schedule (registered on the instance), so route
+		// scheduling through the instance reconciler rather than duplicating interval logic here.
+		if ( ! empty( $opts['fast_sync_enabled'] ) ) {
+			self::instance()->reconcile_fast_cron();
+		}
 	}
 
 	private static function schedule_cron_at_time() {
@@ -135,6 +147,7 @@ final class WC_Product_Sync {
 
 	public static function deactivate() {
 		wp_clear_scheduled_hook( self::CRON_HOOK );
+		wp_clear_scheduled_hook( self::FAST_CRON_HOOK );
 	}
 
 	public function sync_cron_schedule() {
@@ -145,6 +158,47 @@ final class WC_Product_Sync {
 		} elseif ( ! $enabled && $scheduled ) {
 			wp_clear_scheduled_hook( self::CRON_HOOK );
 		}
+		$this->reconcile_fast_cron();
+	}
+
+	/** Register the dynamic cron schedule used by the fast field-refresh sync. Its interval always
+	 *  reflects the currently-configured minutes (floored to a safe minimum so we never hammer the
+	 *  source). WP-Cron re-reads this on each reschedule. */
+	public function register_fast_schedule( $schedules ) {
+		$min = $this->fast_interval_minutes();
+		$schedules[ self::FAST_SCHEDULE ] = array(
+			'interval' => $min * MINUTE_IN_SECONDS,
+			'display'  => sprintf( __( 'Co %d min (WC Product Sync)', 'wc-product-sync' ), $min ),
+		);
+		return $schedules;
+	}
+
+	/** Configured fast-sync interval in minutes, floored to 15 (anti-hammer) and capped at 1 day. */
+	private function fast_interval_minutes() {
+		return max( 15, min( 1440, (int) $this->get_options()['fast_sync_interval_min'] ) );
+	}
+
+	/** (Re)schedule or clear the fast field-refresh event to match current settings. Reschedules
+	 *  when the interval changed so a saved settings update takes effect. Safe to call repeatedly. */
+	public function reconcile_fast_cron() {
+		$enabled = ! empty( $this->get_options()['fast_sync_enabled'] );
+		$next    = wp_next_scheduled( self::FAST_CRON_HOOK );
+		if ( ! $enabled ) {
+			if ( $next ) {
+				wp_clear_scheduled_hook( self::FAST_CRON_HOOK );
+			}
+			return;
+		}
+		$want = $this->fast_interval_minutes() * MINUTE_IN_SECONDS;
+		if ( $next ) {
+			$ev = function_exists( 'wp_get_scheduled_event' ) ? wp_get_scheduled_event( self::FAST_CRON_HOOK ) : null;
+			if ( $ev && (int) $ev->interval === $want ) {
+				return; // already scheduled at the right cadence
+			}
+			wp_clear_scheduled_hook( self::FAST_CRON_HOOK ); // interval changed → reschedule
+		}
+		wp_schedule_event( time() + $want, self::FAST_SCHEDULE, self::FAST_CRON_HOOK );
+		$this->log( 'info', sprintf( 'Zaplanowano szybką synchronizację co %d min.', $want / MINUTE_IN_SECONDS ) );
 	}
 
 	private function schedule_next_run() {
@@ -178,6 +232,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			'per_page'         => $this->cfg_per_page(),    // Store per_page for resume
 			'started_at'       => $started_at,
 			'updated_at'       => time(),                   // Heartbeat — used to detect a stalled/no-cron sync
+			'fast'             => $this->fast_mode ? 1 : 0, // Resume batches must keep fast (field-refresh) mode
 		), 3600 ); // Persist for 1 hour (enough for all batches to finish)
 	}
 
@@ -319,6 +374,9 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			$this->log( 'info', 'No progress found for resume — nothing to do.' );
 			return;
 		}
+		// Restore fast (field-refresh) mode for this batch so a multi-batch fast sync stays
+		// update-only/restricted-fields across resumes instead of falling back to a full sync.
+		$this->fast_mode = ! empty( $progress['fast'] );
 
 		// Check if a manual sync is already running (Codex #6 fix: sync lock)
 		$lock = get_transient( self::SYNC_LOCK_TRANSIENT );
@@ -428,6 +486,10 @@ $defaults = array(
 		'sync_types'          => array( 'simple', 'variable', 'grouped' ),
 		'sync_statuses'       => array( 'publish' ),
 		'sync_fields'         => array( 'description', 'price', 'stock', 'images', 'categories', 'attributes', 'dimensions' ),
+		// Fast field-refresh (frequent, update-only): which volatile fields to refresh and how often.
+		'fast_sync_enabled'      => 0,
+		'fast_sync_interval_min' => 60,                      // minutes (floored to 15 at use)
+		'fast_sync_fields'       => array( 'price', 'stock' ),
 	);
 		$raw = get_option( self::OPTION_KEY, array() );
 		// Migration: pre-0.9.5 used a separate soft_delete_enabled checkbox. Map it onto
@@ -437,7 +499,7 @@ $defaults = array(
 		}
 		$opts = wp_parse_args( $raw, $defaults );
 		// Ensure the array-typed options are always arrays (older saved rows may lack them).
-		foreach ( array( 'sync_types', 'sync_statuses', 'sync_fields' ) as $ak ) {
+		foreach ( array( 'sync_types', 'sync_statuses', 'sync_fields', 'fast_sync_fields' ) as $ak ) {
 			if ( ! is_array( $opts[ $ak ] ) ) {
 				$opts[ $ak ] = $defaults[ $ak ];
 			}
@@ -485,11 +547,19 @@ $defaults = array(
 		if ( ! $this->writing_update ) {
 			return true; // creating a new product → import all fields
 		}
-		return in_array( $field, (array) $this->get_options()['sync_fields'], true );
+		// Fast field-refresh runs write only the configured fast set (e.g. price/stock); the daily
+		// full sync uses the main sync_fields set.
+		$fields = $this->fast_mode
+			? $this->get_options()['fast_sync_fields']
+			: $this->get_options()['sync_fields'];
+		return in_array( $field, (array) $fields, true );
 	}
 
 	/** Should products missing from the source be handled at all? ('none' = leave them). */
 	private function deletion_enabled() {
+		if ( $this->fast_mode ) {
+			return false; // fast field-refresh never creates or deletes products
+		}
 		return 'none' !== ( $this->get_options()['deletion_mode'] ?? 'none' );
 	}
 
@@ -567,6 +637,12 @@ $defaults = array(
 		$out['sync_types']    = $this->sanitize_choice_set( $input['sync_types'] ?? array(), array( 'simple', 'variable', 'grouped' ) );
 		$out['sync_statuses'] = $this->sanitize_choice_set( $input['sync_statuses'] ?? array(), array( 'publish', 'draft', 'pending', 'private' ) );
 		$out['sync_fields']   = $this->sanitize_choice_set( $input['sync_fields'] ?? array(), array( 'description', 'price', 'stock', 'images', 'categories', 'attributes', 'dimensions' ) );
+		// Fast field-refresh settings.
+		$out['fast_sync_enabled']      = empty( $input['fast_sync_enabled'] ) ? 0 : 1;
+		if ( isset( $input['fast_sync_interval_min'] ) ) {
+			$out['fast_sync_interval_min'] = max( 15, min( 1440, (int) $input['fast_sync_interval_min'] ) );
+		}
+		$out['fast_sync_fields'] = $this->sanitize_choice_set( $input['fast_sync_fields'] ?? array(), array( 'price', 'stock' ) );
 		add_action( 'shutdown', array( $this, 'sync_cron_schedule' ) );
 		return $out;
 	}
@@ -614,6 +690,7 @@ $defaults = array(
 		}
 		$opts    = $this->get_options();
 		$next    = wp_next_scheduled( self::CRON_HOOK );
+		$fast_next = wp_next_scheduled( self::FAST_CRON_HOOK );
 		$run_url = wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_run&mode=run' ), self::NONCE_ACTION );
 		$dry_url = wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_run&mode=dry' ), self::NONCE_ACTION );
 		$progress = $this->get_sync_progress();
@@ -861,6 +938,32 @@ $defaults = array(
 						</td>
 					</tr>
 					<tr>
+						<th scope="row"><?php esc_html_e( 'Szybka synchronizacja (cykliczna)', 'wc-product-sync' ); ?></th>
+						<td>
+							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[fast_sync_enabled]" value="1"
+								<?php checked( ! empty( $opts['fast_sync_enabled'] ) ); ?> /> <?php esc_html_e( 'Odświeżaj wybrane pola co', 'wc-product-sync' ); ?></label>
+							<input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[fast_sync_interval_min]" type="number" min="15" max="1440" step="5" class="small-text"
+								value="<?php echo esc_attr( $opts['fast_sync_interval_min'] ?? 60 ); ?>" style="width:70px;" /> <?php esc_html_e( 'minut', 'wc-product-sync' ); ?>
+							<div style="margin-top:6px;">
+								<?php $wps_checkbox_group( 'fast_sync_fields', array(
+									'price' => __( 'Cena', 'wc-product-sync' ),
+									'stock' => __( 'Stan magazynowy', 'wc-product-sync' ),
+								), $opts['fast_sync_fields'] ); ?>
+							</div>
+							<p class="description">
+								<?php esc_html_e( 'Lekki, częsty przebieg między codziennymi synchronizacjami — tylko AKTUALIZUJE istniejące produkty (bez tworzenia i usuwania), tylko zaznaczone pola. Minimum 15 minut.', 'wc-product-sync' ); ?>
+								<br />
+								<?php
+								if ( $fast_next ) {
+									printf( esc_html__( 'Następne odświeżenie: %s', 'wc-product-sync' ), esc_html( get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $fast_next ), 'Y-m-d H:i:s' ) ) );
+								} else {
+									esc_html_e( 'Nie zaplanowano.', 'wc-product-sync' );
+								}
+								?>
+							</p>
+						</td>
+					</tr>
+					<tr>
 						<th scope="row"><?php esc_html_e( 'Pełna synchronizacja', 'wc-product-sync' ); ?></th>
 						<td>
 							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[force_full_sync]" value="1"
@@ -1066,6 +1169,29 @@ $defaults = array(
 	}
 
 	public function run_sync_cron() {
+		// Don't hijack an in-flight fast (field-refresh) sync's batched progress in full mode —
+		// let it finish; the daily run will proceed on its next scheduled tick.
+		$prog = $this->get_sync_progress();
+		if ( $prog && ! empty( $prog['fast'] ) ) {
+			$this->log( 'info', 'Codzienna synchronizacja odłożona — szybka synchronizacja w toku.' );
+			return;
+		}
+		$this->run_sync( false );
+	}
+
+	/** Frequent field-refresh (e.g. hourly price/stock). Update-only, restricted to fast_sync_fields.
+	 *  Reuses the full sync pipeline via $fast_mode; skips if any sync is already in progress. */
+	public function run_fast_sync_cron() {
+		if ( $this->get_sync_progress() || false !== get_transient( self::SYNC_LOCK_TRANSIENT ) ) {
+			$this->log( 'info', 'Szybka synchronizacja pominięta — inna synchronizacja w toku.' );
+			return;
+		}
+		if ( empty( (array) $this->get_options()['fast_sync_fields'] ) ) {
+			$this->log( 'info', 'Szybka synchronizacja: brak wybranych pól — pomijam.' );
+			return;
+		}
+		$this->fast_mode = true;
+		$this->log( 'info', '=== Szybka synchronizacja (aktualizacja istniejących, wybrane pola) ===' );
 		$this->run_sync( false );
 	}
 
@@ -1247,7 +1373,7 @@ $defaults = array(
 		}
 
 		// Pełna synchronizacja – usuń stare lokalne produkty. Only on the first pass.
-		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && $is_first_batch;
+		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && $is_first_batch && ! $this->fast_mode;
 		if ( $force_full && ! $dry_run ) {
 			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
 			global $wpdb;
@@ -1482,7 +1608,11 @@ $defaults = array(
 		// Grouped products — FINAL pass (B3). Now that every simple/variable product across all
 		// batches is synced, fetch grouped products from the source and upsert them; their children
 		// resolve by _wps_source_id regardless of which batch they were in, or their order.
-		$this->sync_grouped_products( $dry_run, $stats );
+		// Skipped in fast mode: grouped products carry no own price/stock (derived from children),
+		// so a field-refresh has nothing to do for them.
+		if ( ! $this->fast_mode ) {
+			$this->sync_grouped_products( $dry_run, $stats );
+		}
 
 		// Handle products removed from source (soft/hard per deletion_mode). We only reach here
 		// when the sync is COMPLETE (all pages processed across however many batches). Compare the
@@ -1811,6 +1941,11 @@ $defaults = array(
 
 	/** Tworzy nowy produkt i zapisuje go na celzie. */
 	private function create_new_product( $wanted_class, $wanted_term, array $p, $dry_run, $sku ) {
+		// Fast field-refresh is update-only: never create products the daily full sync would create.
+		if ( $this->fast_mode ) {
+			$this->last_skip_reason = 'szybka synchronizacja: nowe produkty pomijane (tylko aktualizacja)';
+			return 'skipped';
+		}
 		if ( $dry_run ) {
 			if ( 'WC_Product_Variable' === $wanted_class ) {
 				$vars = $this->fetch_variations( (int) $p['id'] );
@@ -2038,6 +2173,11 @@ $defaults = array(
 				}
 
 				$is_update = (bool) $vid;
+				// Fast field-refresh is update-only: skip source variations with no local match
+				// (adding them is a structural change left to the daily full sync).
+				if ( ! $is_update && $this->fast_mode ) {
+					continue;
+				}
 				$variation = $vid ? wc_get_product( $vid ) : new WC_Product_Variation();
 				if ( ! $variation ) {
 					$variation = new WC_Product_Variation();
@@ -2073,7 +2213,9 @@ $defaults = array(
 			}
 		}
 
-		if ( ! $this->variations_fetch_error ) {
+		if ( $this->fast_mode ) {
+			// Fast field-refresh is update-only — leave variation add/remove to the daily full sync.
+		} elseif ( ! $this->variations_fetch_error ) {
 			foreach ( $parent->get_children() as $vid ) {
 				if ( empty( $kept[ $vid ] ) ) {
 					$stale = wc_get_product( $vid );
@@ -2559,6 +2701,7 @@ $defaults = array(
 		// Scheduled events.
 		wp_clear_scheduled_hook( self::CRON_HOOK );
 		wp_clear_scheduled_hook( self::RESUME_HOOK );
+		wp_clear_scheduled_hook( self::FAST_CRON_HOOK );
 		// In-flight sync transients.
 		delete_transient( self::SYNC_LOCK_TRANSIENT );
 		delete_transient( self::SYNC_PROGRESS_TRANSIENT );

@@ -1,4 +1,4 @@
-# WC Product Sync — TODO (current: v0.9.15 → next tagged = 1.0)
+# WC Product Sync — TODO (current: v0.9.16 → next tagged = 1.0)
 
 ## ✅ Completed
 
@@ -50,7 +50,29 @@
 
 ---
 
-## v0.9.15+ — Remaining open items
+## ✅ Completed (v0.9.16 — Fast field-refresh sync)
+
+- **Feature: cyclical "fast sync"** — a lightweight recurring run that refreshes only volatile
+  fields (default price + stock, configurable) on a free-form minute interval (floored to 15 to
+  avoid hammering the source), separate from the daily full sync. **Update-only**: never creates
+  or deletes products/variations — those stay with the daily sync. Implemented by reusing the full
+  pipeline via a run-scoped `$fast_mode` flag rather than a parallel loop:
+  - `field_on()` switches to `fast_sync_fields` in fast mode; `deletion_enabled()` returns false;
+    `create_new_product()` returns `skipped`; `sync_variations()` skips variation add/remove;
+    grouped final pass and `force_full` are bypassed.
+  - Own cron event `FAST_CRON_HOOK` on a dynamic `cron_schedules` interval; reconciled on
+    settings-save / activate (reschedules when interval changes), cleared on deactivate/uninstall.
+  - Mutual exclusion with the daily sync via progress/lock guards; `fast` flag persisted in the
+    progress transient so multi-batch fast runs stay fast across resumes.
+  - New options: `fast_sync_enabled`, `fast_sync_interval_min`, `fast_sync_fields` + admin UI row.
+  - Verified E2E on rig: source price 190→260 refreshed on target while description (not selected)
+    preserved; new source product SKIPPED by fast (created=0) but CREATED by full sync; cron
+    scheduled at 900s. 492/492, 0 errors, ~40s.
+- Version header bumped 0.9.15 → 0.9.16.
+
+---
+
+## v0.9.16+ — Remaining open items
 
 ### Known limitation (from P2):
 - Source keys cap (20k) interacts with soft-delete: on catalogs >20k with soft-delete enabled,
