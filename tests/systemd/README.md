@@ -39,3 +39,24 @@ PRICE_TEST_K=10 tests/price-sync-test.sh tick
 ```
 
 Requires `tests/perf.env` with `QNAP_*` and `SRC_*` entries (see the file; it's gitignored).
+
+## Monitoring
+
+Each run emits (best-effort, never fails the test):
+- **InfluxDB** metric `wps_price_check` (bucket `tests`, org `mppcc`): fields
+  `checked/mismatch/mutated/batches/duration/fail` (`fail`=0/1), tags `mode`+`verdict`.
+- **Grafana** region annotation (tags `wps-price`+verdict) over the run window.
+
+The perf dashboard (`grafana-dashboard.json`, uid `wps-perf`) has two parity panels + a
+`wps-price` annotation overlay. To apply the updated dashboard to live Grafana:
+
+```sh
+cd tests && source ./perf.env
+python3 -c 'import json;d=json.load(open("grafana-dashboard.json"));x=d["dashboard"];x.pop("id",None);json.dump({"dashboard":x,"overwrite":True},open("/tmp/di.json","w"))'
+curl -H "Authorization: Bearer $GRAFANA_TOKEN" -H "Content-Type: application/json" \
+  -X POST "$GRAFANA/api/dashboards/db" --data-binary @/tmp/di.json
+```
+
+No Grafana alert rule is configured — detect a FAIL via `systemctl --user --failed`,
+`metrics/price-check.csv`, or the dashboard's "Ostatni werdykt parytetu" panel.
+
