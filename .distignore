@@ -1,0 +1,29 @@
+# Files excluded from the distributable plugin package (build.sh / `wp dist-archive`).
+# Everything here stays in git history but does NOT ship in the installable ZIP.
+
+# VCS / build tooling
+.git
+.gitignore
+.distignore
+build.sh
+
+# Internal dev / AI-process artifacts
+LOOP.md
+LOOP-impl-r1.txt
+LOOP-plan-r1.txt
+LOOP-plan-r2.txt
+PLAN.md
+TODO.md
+claude-plan-r1.txt
+claude-review-r1.txt
+codex-impl-r1.txt
+
+# LAN-specific test rig, metrics, monitoring
+tests
+metrics
+
+# Build/output cruft
+*.zip
+*.log
+vendor
+composer.lock

@@ -8,6 +8,14 @@
  * Requires at least: 6.0
  * Requires Plugins:  woocommerce
  * Text Domain:       wc-product-sync
+ * License:           GPLv2 or later
+ * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
+ *
+ * WC Product Sync (SKU) is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 2 of the License, or (at your option) any
+ * later version. Distributed WITHOUT ANY WARRANTY. See the LICENSE file or
+ * <https://www.gnu.org/licenses/gpl-2.0.html> for details.
  *
  * Instalacja na sklepie DOCELOWYM. Ze źródła czytamy przez REST, na cel zapisujemy lokalnie.
  *
