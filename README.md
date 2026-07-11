@@ -65,6 +65,9 @@ Przy trybie `soft` opcja `soft_delete_limit` (domyślnie 50) określa, ile szkic
 
 **Bezpieczeństwo:** usuwanie jest wykonywane **dopiero po** pełnym i bezbłędnym pobraniu katalogu ze źródła. Błąd pobierania REST albo przekroczenie capa kluczy źródłowych (20 000) wstrzymuje usuwanie — niepełny widok źródła nigdy nie usunie lokalnych produktów (v0.9.19).
 
+### Pełna synchronizacja (`force_full_sync`)
+Niezależna od `deletion_mode` opcja **„Trwale usuń lokalne produkty nieobecne w źródle"**. Po **zakończeniu całego przebiegu** trwale usuwa lokalne produkty oznaczone jako zsynchronizowane, których **nie** odświeżono w tym przebiegu (zniknęły ze źródła). Produkty utworzone/zaktualizowane w bieżącym przebiegu są **zachowane** — mechanizm porównuje znacznik `_wps_synced` z chwilą startu przebiegu, więc działa tak samo dla katalogów jedno- i wielobatchowych. Pomijana przy błędzie pobierania oraz gdy nie da się ustalić znacznika startu (bezpiecznik). **Uwaga:** produkty pominięte przez filtr statusów (np. źródłowe wersje robocze przy `sync_statuses = publish`) nie są odświeżane, więc force-full je usunie (v0.9.20).
+
 ---
 
 ## Harmonogram
@@ -199,7 +202,13 @@ Sprawdź w WooCommerce → Ustawienia → Zaawansowane → REST API czy Consumer
 
 ## Zmiany (Changelog)
 
-### 0.9.19 (current) — bezpieczeństwo danych (przegląd Codex, runda 4)
+### 0.9.20 (current) — naprawa force-full (utrata danych / brak działania)
+- **[krytyczne] Force-full działał tylko pozornie:** kasowanie było bramkowane warunkiem „pierwszy batch", a wykonywane dopiero po zakończeniu przebiegu. Dla katalogów dzielonych na batche (koniec wypada na batchu wznowienia) **nigdy się nie uruchamiało**; dla katalogów mieszczących się w jednym batchu **kasowało właśnie zsynchronizowane produkty** (zapytanie usuwało *wszystkie* rekordy z `_wps_synced`, w tym te odświeżone w tym przebiegu).
+- **Naprawa:** force-full usuwa teraz **wyłącznie** produkty, których **nie** odświeżono w bieżącym przebiegu — porównując znacznik `_wps_synced` ze znacznikiem startu przebiegu (`SELECT ... WHERE meta_key='_wps_synced' AND CAST(meta_value AS UNSIGNED) < <start>`). Znacznik startu jest utrwalany w `wps_last_sync_result` i przeżywa batche wznowienia, więc kasacja jest spójna dla katalogów jedno- i wielobatchowych.
+- **Bezpiecznik:** brak wiarygodnego znacznika startu → kasacja **pomijana** (nigdy „na wszelki wypadek"). Nadal wymaga bezbłędnego pobrania całego katalogu. Usunięcia trafiają do raportu (`hard_deleted`).
+- Zweryfikowane na środowisku testowym (katalog 492 produktów, 3 batche): force-full uruchomił się na batchu wznowienia i usunął **0** produktów przy pełnej parności ze źródłem (poprzednio: brak uruchomienia).
+
+### 0.9.19 — bezpieczeństwo danych (przegląd Codex, runda 4)
 - **P1 [krytyczne]:** usuwanie przy force-full przeniesione **z przed** pobierania **na po** przetworzeniu — awaria REST po skasowaniu nie wymazuje już całego katalogu bez możliwości odzyskania.
 - **P2 [krytyczne]:** przekroczenie capa 20 000 kluczy źródłowych ustawia `had_error = true`, blokując usuwanie na niepełnym widoku źródła (wcześniej ważne produkty mogły zostać fałszywie usunięte).
 

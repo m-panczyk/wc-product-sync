@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.19
+ * Version:           0.9.20
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -998,8 +998,8 @@ $defaults = array(
 						<th scope="row"><?php esc_html_e( 'Pełna synchronizacja', 'wc-product-sync' ); ?></th>
 						<td>
 							<label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[force_full_sync]" value="1"
-								<?php checked( ! empty( $opts['force_full_sync'] ) ); ?> /> <?php esc_html_e( 'Wyczyść lokalne produkty sync przed uruchomieniem', 'wc-product-sync' ); ?></label>
-							<p class="description"><?php esc_html_e( 'UWAGA: usunie wszystkie lokalne produkty oznaczone jako zsynchronizowane. Zalecane przy pierwszym użyciu.', 'wc-product-sync' ); ?></p>
+								<?php checked( ! empty( $opts['force_full_sync'] ) ); ?> /> <?php esc_html_e( 'Trwale usuń lokalne produkty nieobecne w źródle', 'wc-product-sync' ); ?></label>
+							<p class="description"><?php esc_html_e( 'UWAGA: po zakończeniu przebiegu trwale usuwa lokalne produkty oznaczone jako zsynchronizowane, których NIE odświeżono w tym przebiegu (zniknęły ze źródła). Produkty utworzone/zaktualizowane w tym przebiegu są zachowane. Pomijane przy błędzie pobierania ze źródła.', 'wc-product-sync' ); ?></p>
 						</td>
 					</tr>
 					<tr>
@@ -1414,10 +1414,13 @@ $defaults = array(
 			}
 		}
 
-		// Pełna synchronizacja – usuń stare lokalne produkty AFTER processing completes.
-		// Only on the first batch AND only when all source fetches succeeded.
-		// This prevents data loss if source API fails after products were deleted.
-		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && $is_first_batch && ! $this->fast_mode;
+		// Pełna synchronizacja – po zakończeniu CAŁEGO przebiegu usuń lokalne produkty, które nie
+		// zostały odświeżone w tym przebiegu (znacznik _wps_synced starszy niż start przebiegu →
+		// zniknęły ze źródła). Uruchamiane na batchu, który KOŃCZY sync (niekoniecznie pierwszym),
+		// więc BEZ warunku $is_first_batch — z nim dla katalogów dzielonych na batche kasacja nigdy
+		// by się nie wykonała (koniec przypada na batch wznowienia, gdzie is_first_batch=false).
+		// Sama kasacja jest dodatkowo bramkowana brakiem błędu pobierania (patrz niżej).
+		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && ! $this->fast_mode;
 
 		$this->attr_map_cache   = array();
 		$this->source_id_to_sku = array();
@@ -1640,25 +1643,55 @@ $defaults = array(
 			$this->sync_grouped_products( $dry_run, $stats );
 		}
 
-		// Force-full sync: wipe all locally synced products BEFORE soft-delete cleanup.
-		// Only runs after ALL source fetches completed without errors — if we got here
-		// with force_full=true, we know the product list is complete and accurate.
+		// Force-full sync: wipe local products removed from the source, BEFORE soft-delete cleanup.
+		// Only runs after ALL source fetches completed without errors — a partial view could wrongly
+		// wipe valid products. Crucially, we delete only products NOT re-synced during THIS run:
+		// every product created/updated this run is re-stamped (mark_synced → _wps_synced = time()),
+		// so anything still carrying a timestamp older than the run start has disappeared from the
+		// source. This is safe across batched/resumed syncs — unlike a blanket "all synced products"
+		// delete, which erased the very products we just imported when a run completed in one batch.
 		if ( $force_full && ! $dry_run && ! $this->fetch_had_error ) {
-			$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: usuwanie lokalnych produktów oznaczonych przez sync...' );
-			global $wpdb;
-			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s", self::META_SYNCED ) );
-			$ids = array_unique( array_map( 'absint', $ids ) );
-			if ( ! empty( $ids ) ) {
-				foreach ( $ids as $pid ) {
-					$p = wc_get_product( $pid );
-					if ( $p ) {
-						$p->delete( true );
+			// Run-start baseline: persisted in SYNC_LAST_RESULT (survives across resume batches) and
+			// set just before the page loop on the first batch (reset_run_result). Every product
+			// synced this run — on any batch — carries _wps_synced >= this value.
+			$run_result = get_option( self::SYNC_LAST_RESULT, array() );
+			$run_start  = ( is_array( $run_result ) && ! empty( $run_result['started_at'] ) ) ? (int) $run_result['started_at'] : 0;
+			if ( $run_start < 1 ) {
+				// Fail safe: without a reliable baseline we can't distinguish fresh from stale
+				// products, so skip the wipe entirely rather than risk deleting freshly-synced items.
+				$this->log( 'warning', 'PEŁNA SYNCHRONIZACJA: brak znacznika startu przebiegu — pomijam usuwanie (bezpiecznik).' );
+			} else {
+				global $wpdb;
+				$ids = $wpdb->get_col( $wpdb->prepare(
+					"SELECT post_id FROM {$wpdb->postmeta}
+					 WHERE meta_key = %s AND CAST(meta_value AS UNSIGNED) < %d",
+					self::META_SYNCED,
+					$run_start
+				) );
+				$ids = array_unique( array_map( 'absint', $ids ) );
+				if ( ! empty( $ids ) ) {
+					$this->log( 'info', sprintf( 'PEŁNA SYNCHRONIZACJA: usuwanie %d lokalnych produktów nieobecnych w źródle...', count( $ids ) ) );
+					foreach ( $ids as $pid ) {
+						$p    = wc_get_product( $pid );
+						$name = $p ? $p->get_name() : '';
+						$sku  = $p ? $p->get_sku() : '';
+						$this->report_add( 'hard_deleted', array(
+							'name'   => $name,
+							'sku'    => $sku,
+							'type'   => $p ? $p->get_type() : '',
+							'reason' => 'pełna synchronizacja — brak w źródle',
+						) );
+						if ( $p ) {
+							$p->delete( true );
+						} else {
+							wp_delete_post( $pid, true );
+						}
 						$this->log( 'info', sprintf( 'Usunięto lokalny produkt ID=%d (full sync)', $pid ) );
-					} else {
-						wp_delete_post( $pid, true );
 					}
+					$this->log( 'info', sprintf( 'Usunięto %d lokalnych produktów (pełna synchronizacja).', count( $ids ) ) );
+				} else {
+					$this->log( 'info', 'PEŁNA SYNCHRONIZACJA: brak produktów do usunięcia — wszystkie obecne w źródle.' );
 				}
-				$this->log( 'info', sprintf( 'Usunięto %d lokalnych produktów.', count( $ids ) ) );
 			}
 		}
 

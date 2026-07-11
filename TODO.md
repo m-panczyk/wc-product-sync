@@ -106,6 +106,27 @@
 
 ---
 
+## ✅ Completed (v0.9.20 — force-full fix)
+
+- **[CRITICAL]: Force-full sync either no-op'd or wiped the fresh catalog.** The delete was gated on
+  `$is_first_batch` but ran only in the completion path. On batched catalogs completion lands in a
+  resume batch (`is_first_batch=false`) → force-full **never ran**. On single-batch catalogs it ran on
+  the first batch and the query (`WHERE meta_key='_wps_synced'`, no value filter) deleted **all** synced
+  products — including the ones just created/updated in the same run.
+- **Fix:** dropped the `$is_first_batch` gate so force-full runs on whichever batch completes the sync,
+  and changed the delete to `... AND CAST(meta_value AS UNSIGNED) < <run_start>`. Every product synced
+  this run is re-stamped `_wps_synced = time()` (on any batch), so only products carrying a timestamp
+  older than the run start (gone from source) are removed. `run_start` comes from
+  `wps_last_sync_result['started_at']`, which persists across resume batches.
+- **Fail-safe:** if no reliable `run_start`, the wipe is skipped entirely. Deletions are recorded in the
+  `hard_deleted` report bucket. UI label/description corrected (was "wipe before running").
+- **Verified on rig** (492 products, batch_limit=200 → 3 batches, `force_full_sync=1`): force-full ran on
+  the completing resume batch and deleted **0** products at full source parity (`updated=492 errors=0`,
+  price parity `mismatch=0`), confirming both that it now runs on batched catalogs and that it no longer
+  deletes freshly-synced products. Old plugin backed up on target as `wc-product-sync.php.bak-0918`.
+
+---
+
 ## ✅ Completed (v0.9.19 — Round 4: Codex full code review)
 
 - **P1 [CRITICAL]: Force-full sync delete moved from BEFORE fetches to AFTER processing.**
