@@ -5,3 +5,9 @@ vendor/
 composer.lock
 tests/perf.env
 metrics/*.csv
+
+# Docs/notes stay local; only READMEs are tracked
+*.md
+!README.md
+!**/README.md
+*.txt
