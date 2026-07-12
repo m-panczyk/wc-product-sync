@@ -58,10 +58,11 @@
 - **Threshold**: 1.5× median = WARNING (not a hard fail — perf context matters)
 - **Output**: `PERF_OK:` or `PERF_REGRESSION:` on stderr
 
-### Round 6 — Test documentation (commit pending)
+### Round 6 — Test documentation + perf.env.example (commit 66a6993)
 
-- Added comprehensive Testing section to README.md
-- Covers all test scripts, rig setup, usage examples, CI integration tips
+- **README.md**: New "Testing" section covering all scripts, usage examples, systemd setup
+- **tests/perf.env.example**: Template with placeholder values for new testers
+- Covers: smoke test, parity test (all modes), perf benchmark, Grafana push, systemd timers, PHPCS-WP linting, inline fallback commands
 
 ### Round 2 — Plugin smoke test (commit 08ac419)
 
