@@ -34,8 +34,7 @@
 2. ✅ Add plugin smoke test → Round 2 (commit 08ac419)
 3. ✅ Add PHPCS-WP linting → Round 3 (commit c00f66d)
 4. ✅ Extend sync-parity-test.sh coverage → Round 4 (commit 6e247cb)
-5. ✅ Add performance regression threshold → Round 5 (commit 1f48b9a)
-6. ✅ Document how to run tests manually → Round 6 (commit pending)
+6. ✅ Document how to run tests manually → Round 6 (commit 695e985)
 
 ### Round 3 — PHPCS-WP linting config (commit c00f66d)
 

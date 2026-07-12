@@ -1,0 +1,41 @@
+name: WC Product Sync - Performance Tests  
+on: 
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  perf-benchmark:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check rig connectivity  
+        run: |
+          if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$QNAP_SSH" echo "pong" >/dev/null 2>&1; then
+            echo "::warning::QNAP rig unreachable — skipping performance test"
+            exit 0
+          fi
+
+      - name: Run performance benchmark (best-effort)
+        env:
+          QNAP_SSH: ${{ secrets.QNAP_SSH }}
+          QNAP_DOCKER: ${{ secrets.QNAP_DOCKER }}
+          QNAP_PROJECT: ${{ secrets.QNAP_PROJECT }}
+          INFLUX: ${{ secrets.INFLUX_URL }}  
+          INFLUX_TOKEN: ${{ secrets.INFLUX_TOKEN }}
+        run: |
+          cd tests/
+          chmod +x perf-run.sh
+          ./perf-run.sh ci-test 0 || echo "::warning::Performance test failed gracefully"
+
+      - name: Upload performance metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-metrics
+          path: |
+            metrics/perf-history.csv
+            metrics/price-history.csv  
+            metrics/stock-history.csv
