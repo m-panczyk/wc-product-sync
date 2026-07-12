@@ -13,8 +13,10 @@ SLUG="wc-product-sync"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-# Version from the plugin header (single source of truth).
-VERSION="$(grep -m1 -oE 'Version:[[:space:]]*[0-9.]+' "$SLUG.php" | grep -oE '[0-9.]+')"
+# Version from the plugin header (single source of truth). Accepts a prerelease suffix
+# (0.9.24-beta1): PHP's version_compare ranks that BELOW 0.9.24, which is what the beta
+# channel relies on — a beta never looks newer than the final it precedes.
+VERSION="$(grep -m1 -oE 'Version:[[:space:]]*[0-9][0-9A-Za-z.-]*' "$SLUG.php" | sed -E 's/^Version:[[:space:]]*//')"
 [ -n "$VERSION" ] || { echo "ERROR: could not read Version from $SLUG.php" >&2; exit 1; }
 
 # Files/dirs that ship in the package.

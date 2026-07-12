@@ -300,6 +300,36 @@ define( 'WC_PRODUCT_SYNC_UPDATE_URL',   'https://git.panczyk.cc/mpanczyk/wc-prod
 define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' );
 ```
 
+### Kanały wydań: `latest` (stable) i `latest-beta`
+
+Kanał **wynika z wersji** — nie podaje się go ręcznie, więc beta nie trafi na produkcję przez pomyłkę:
+
+| Wersja w nagłówku | Tag | Publikowane do |
+|---|---|---|
+| `0.9.24-beta1` | `v0.9.24-beta1` | **`latest-beta`** (sklepy produkcyjne tego nie widzą) |
+| `0.9.24` | `v0.9.24` | **`latest` + `latest-beta`** |
+
+Wydanie finalne trafia do **obu** kanałów celowo: kanał beta jest **nadzbiorem** stabilnego. Gdyby
+finał szedł tylko na `latest`, sklep testowy zostałby na `0.9.24-beta1` na zawsze i nigdy nie dostałby
+`0.9.24`, która ją zastępuje.
+
+Działa to, bo PHP-owe `version_compare` porządkuje `0.9.24-beta1 < 0.9.24` (a `0.9.22 < 0.9.24-beta1`)
+— beta nigdy nie wygląda na nowszą od finału, który po niej następuje.
+
+**Sklep testowy** wskazujesz na kanał beta jedną stałą:
+
+```php
+define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/latest-beta/update.json' );
+```
+
+Wydania beta robisz z gałęzi roboczej (np. `next`) — `release.yaml` reaguje na **tag `v*`**, niezależnie
+od gałęzi:
+
+```bash
+# na gałęzi next, z Version: 0.9.24-beta1 w nagłówku wtyczki
+git tag v0.9.24-beta1 && git push forgejo v0.9.24-beta1
+```
+
 ---
 
 ## Budowanie paczki

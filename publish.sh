@@ -32,11 +32,24 @@ SLUG="wc-product-sync"
 # The tag is the source of truth for what we claim to ship; the plugin header is the
 # source of truth for what the updater will compare against. They must agree, or stores
 # either never see the update or re-download forever.
-VERSION="$(grep -m1 -oE 'Version:[[:space:]]*[0-9.]+' "$SLUG.php" | grep -oE '[0-9.]+')"
+VERSION="$(grep -m1 -oE 'Version:[[:space:]]*[0-9][0-9A-Za-z.-]*' "$SLUG.php" | sed -E 's/^Version:[[:space:]]*//')"
 [ "$TAG" = "v$VERSION" ] || {
 	echo "ERROR: tag '$TAG' does not match plugin header version '$VERSION' (expected v$VERSION)" >&2
 	exit 1
 }
+
+# Release channels, derived from the version — never passed in by hand, so a beta cannot
+# reach production by mistake.
+#
+#   0.9.24-beta1 -> latest-beta          (prod stores never see it)
+#   0.9.24       -> latest + latest-beta (beta is a SUPERSET of stable)
+#
+# A final publishes to BOTH: otherwise a store on the beta channel would sit on
+# 0.9.24-beta1 forever, never being offered the 0.9.24 that supersedes it.
+case "$VERSION" in
+	*-alpha*|*-beta*|*-rc*) CHANNELS="latest-beta";        PRERELEASE=true ;;
+	*)                      CHANNELS="latest latest-beta"; PRERELEASE=false ;;
+esac
 
 api() { # api METHOD PATH [curl args...]
 	local method="$1" path="$2"; shift 2
@@ -91,22 +104,26 @@ WPS_UPDATE_BASE_URL="$DL_BASE" ./build.sh >/dev/null
 ZIP="dist/$SLUG-$VERSION.zip"
 [ -f "$ZIP" ] && [ -f dist/update.json ] || { echo "ERROR: build produced no artifacts" >&2; exit 1; }
 
-echo "==> Versioned release $TAG"
-VER_ID="$(ensure_release "$TAG" "$TAG" "WC Product Sync $VERSION" false)"
+echo "==> Versioned release $TAG (channels: $CHANNELS)"
+VER_ID="$(ensure_release "$TAG" "$TAG" "WC Product Sync $VERSION" "$PRERELEASE")"
 [ -n "$VER_ID" ] || { echo "ERROR: could not create/find release $TAG" >&2; exit 1; }
 upload_asset "$VER_ID" "$ZIP" "$SLUG-$VERSION.zip"
 upload_asset "$VER_ID" dist/update.json update.json
 
-# This is the step that actually ships the update. Until update.json on `latest` is
-# swapped, every store still sees the previous version.
-echo "==> Moving release 'latest' (updater metadata)"
-LATEST_ID="$(ensure_release latest "latest — updater metadata" \
-	"Metadata pointer for the in-plugin updater (WC_PRODUCT_SYNC_UPDATE_URL). Do not download plugin ZIPs from here — use the versioned release." \
-	true)"
-[ -n "$LATEST_ID" ] || { echo "ERROR: could not create/find release 'latest'" >&2; exit 1; }
-upload_asset "$LATEST_ID" dist/update.json update.json
+# This is the step that actually ships the update. Until update.json on a channel is
+# swapped, every store on that channel still sees the previous version.
+for CHANNEL in $CHANNELS; do
+	echo "==> Moving release '$CHANNEL' (updater metadata)"
+	CHAN_ID="$(ensure_release "$CHANNEL" "$CHANNEL — updater metadata" \
+		"Metadata pointer for the in-plugin updater (WC_PRODUCT_SYNC_UPDATE_URL). Do not download plugin ZIPs from here — use the versioned release." \
+		true)"
+	[ -n "$CHAN_ID" ] || { echo "ERROR: could not create/find release '$CHANNEL'" >&2; exit 1; }
+	upload_asset "$CHAN_ID" dist/update.json update.json
+done
 
 echo
-echo "Published $VERSION"
+echo "Published $VERSION to: $CHANNELS"
 echo "  ZIP:     $DL_BASE/$SLUG-$VERSION.zip"
-echo "  Updater: $FORGEJO_URL/$FORGEJO_REPO/releases/download/latest/update.json"
+for CHANNEL in $CHANNELS; do
+	echo "  Updater: $FORGEJO_URL/$FORGEJO_REPO/releases/download/$CHANNEL/update.json"
+done
