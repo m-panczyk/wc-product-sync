@@ -6,10 +6,51 @@ Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (**źródło*
 
 ## Instalacja
 
-1. Wgraj plik `wc-product-sync.php` na **sklep docelowy** (cel) do `wp-content/plugins/wc-product-sync/`.
-2. Aktywuj wtyczkę w WordPress → Rozszerzenia.
-3. Uzupełnij konfigurację (URL źródła, Consumer Key/Secret) w menu **WooCommerce → Synchronizacja produktów**.
-4. Uruchom najpierw **Symulację (dry run)**, aby zobaczyć co zostanie zmienione bez zapisu do bazy.
+Wtyczka jest dystrybuowana jako **ZIP** — `wc-product-sync-<wersja>.zip`. W środku jest jeden folder
+najwyższego poziomu `wc-product-sync/`, więc paczka instaluje się wprost z panelu WordPressa, bez
+ręcznego rozpakowywania.
+
+**Wymagania:** WordPress ≥ 6.0, PHP ≥ 7.4, aktywne WooCommerce. Instalujesz na **sklepie docelowym**
+(cel) — ze źródła czytamy tylko przez REST, niczego tam nie instalujemy.
+
+**1. Zdobądź ZIP-a** — pobierz z wydania:
+
+```
+https://git.panczyk.cc/mpanczyk/wc-product-sync/releases
+```
+
+Repozytorium jest **prywatne**, więc pobranie wymaga zalogowania lub tokenu. Alternatywnie zbuduj
+paczkę samodzielnie ze źródeł — patrz „Budowanie paczki" niżej:
+
+```bash
+./build.sh          # → dist/wc-product-sync-<wersja>.zip
+```
+
+**2. Zainstaluj** — panel: **Wtyczki → Dodaj nową → Wyślij wtyczkę na serwer** → wybierz ZIP →
+**Zainstaluj teraz** → **Aktywuj**.
+
+Przez wp-cli (to samo, bez klikania):
+
+```bash
+wp plugin install ./wc-product-sync-0.9.22.zip --activate
+```
+
+Ręcznie przez SSH — rozpakuj tak, aby plik `wc-product-sync.php` wylądował
+w `wp-content/plugins/wc-product-sync/`:
+
+```bash
+unzip wc-product-sync-0.9.22.zip -d wp-content/plugins/
+```
+
+**3. Skonfiguruj** — URL źródła i Consumer Key/Secret w menu **WooCommerce → Synchronizacja
+produktów** (albo stałymi w `wp-config.php` — patrz niżej, metoda zalecana).
+
+**4. Uruchom Symulację (dry run)** — pokaże co zostanie zmienione, bez zapisu do bazy. Zawsze zaczynaj
+od tego.
+
+**Aktualizacja do nowszej wersji:** nie musisz powtarzać tej procedury — po jednorazowym ustawieniu
+stałej `WC_PRODUCT_SYNC_UPDATE_URL` nowe wersje przychodzą przez **Wtyczki → Aktualizuj** jednym
+kliknięciem. Patrz „Aktualizacje z własnego serwera".
 
 ---
 
@@ -220,26 +261,86 @@ define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 Token jest dołączany jako nagłówek `Authorization: token …` **wyłącznie** do żądań na host z `UPDATE_URL` — zarówno do pobrania `update.json`, jak i samego ZIP-a (który ściąga rdzeń WordPressa). Dzięki ograniczeniu do jednego hosta token nigdy nie trafia do innego serwera.
 
-**Hosting** — pod tym URL-em serwuj plik `update.json`, a `download_url` musi wskazywać wersjonowany ZIP:
+**Hosting** — pod `UPDATE_URL` serwujemy `update.json`, którego `download_url` wskazuje wersjonowanego ZIP-a:
 
 ```json
 {
-  "version": "0.9.21",
+  "version": "0.9.22",
   "requires": "6.0",
   "requires_php": "7.4",
   "tested": "6.7",
-  "download_url": "https://twoj-serwer.pl/wc-product-sync/wc-product-sync-0.9.21.zip",
+  "download_url": "https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/v0.9.22/wc-product-sync-0.9.22.zip",
   "sections": { "changelog": "…" }
 }
 ```
 
-`build.sh` generuje ten plik automatycznie do `dist/update.json` (host ustawisz zmienną `WPS_UPDATE_BASE_URL`):
+### Dlaczego wydanie `latest`
 
-```bash
-WPS_UPDATE_BASE_URL=https://twoj-serwer.pl/wc-product-sync ./build.sh
+`UPDATE_URL` to **stała w `wp-config.php`** — ustawiana raz i nigdy nie zmieniana. Nie może więc
+wskazywać na adres przypięty do wersji: sklep skonfigurowany na
+`…/releases/download/v0.9.22/update.json` **na zawsze zostałby na 0.9.22** i nigdy nie zobaczyłby
+0.9.23. Metadane muszą leżeć pod adresem, który się nie zmienia, a treść pod nim ma się zmieniać.
+
+Dlatego obok wydań wersjonowanych (`v0.9.22`, `v0.9.23`, …) utrzymujemy **jedno ruchome wydanie
+z tagiem dosłownie `latest`**, do którego przy każdej publikacji podmieniamy `update.json`. Adres jest
+stały, bo tag się nie zmienia:
+
+```
+https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/latest/update.json
 ```
 
-**Publikacja nowej wersji:** podnieś `Version` w nagłówku wtyczki → `./build.sh` → wgraj `dist/wc-product-sync-<wersja>.zip` i `dist/update.json` na serwer. Metadane są cache'owane 12 h (sukces) / 2 h (błąd serwera), więc niedostępny serwer nie spowalnia panelu.
+Same ZIP-y zostają **niezmienne** pod swoimi tagami wersyjnymi — `latest` niesie tylko metadane,
+a `download_url` w środku pokazuje na wersjonowanego ZIP-a. Dzięki temu instalacja 0.9.22 pobiera
+dokładnie tę paczkę, którą wtedy zbudowano, nawet długo po wydaniu 0.9.23.
+
+Konfiguracja na sklepie docelowym:
+
+```php
+define( 'WC_PRODUCT_SYNC_UPDATE_URL',   'https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/latest/update.json' );
+define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' );
+```
+
+---
+
+## Budowanie paczki
+
+`build.sh` czyta wersję z nagłówka wtyczki (**jedyne źródło prawdy**) i składa dwa artefakty w `dist/`:
+
+| Artefakt | Zawartość |
+|---|---|
+| `wc-product-sync-<wersja>.zip` | `wc-product-sync.php`, `README.md`, `LICENSE`, `docs/` — pod jednym folderem `wc-product-sync/` |
+| `update.json` | metadane dla updatera; `download_url` = `$WPS_UPDATE_BASE_URL/wc-product-sync-<wersja>.zip` |
+
+Wewnętrzne artefakty (`tests/`, `metrics/`, notatki robocze, `build.sh`) **nie trafiają** do paczki.
+
+`WPS_UPDATE_BASE_URL` musi wskazywać katalog, z którego realnie serwowany będzie ZIP — czyli ścieżkę
+pobierania **wydania wersjonowanego**:
+
+```bash
+WPS_UPDATE_BASE_URL=https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/v0.9.23 ./build.sh
+```
+
+Bez tej zmiennej `download_url` wskaże `https://EXAMPLE.invalid/…` — paczka zbuduje się, ale updater
+nie będzie działał.
+
+### Publikacja nowej wersji
+
+1. **Podnieś `Version`** w nagłówku `wc-product-sync.php` i dopisz wpis do sekcji „Zmiany (Changelog)".
+2. **Zbuduj** z `WPS_UPDATE_BASE_URL` ustawionym na ścieżkę nowego tagu (jak wyżej).
+3. **Utwórz wydanie `v<wersja>`** w Forgejo i załącz do niego **`dist/wc-product-sync-<wersja>.zip`**
+   (opcjonalnie też `update.json`, dla porządku).
+4. **Podmień `update.json` w wydaniu `latest`** — usuń stary załącznik, wgraj nowy `dist/update.json`.
+   **To jest krok, który faktycznie publikuje aktualizację** — dopóki go nie zrobisz, sklepy nadal
+   widzą poprzednią wersję.
+
+Metadane są cache'owane po stronie sklepu **12 h** (sukces) / **2 h** (błąd serwera), więc nowa wersja
+pojawi się w panelu w ciągu doby, a niedostępny serwer nigdy nie spowalnia panelu. Cache jest
+czyszczony automatycznie po każdej aktualizacji wtyczki (`upgrader_process_complete`). Żeby wymusić
+sprawdzenie od razu, usuń transient:
+
+```bash
+wp transient delete wps_update_info
+```
 
 ---
 
