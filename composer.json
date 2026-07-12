@@ -1,0 +1,22 @@
+{
+	"name": "mpp/wc-product-sync",
+	"description": "WC Product Sync — WooCommerce product synchronization by SKU",
+	"type": "wordpress-plugin",
+	"license": "GPL-2.0-or-later",
+	"require": {
+		"php": ">=7.4"
+	},
+	"require-dev": {
+		"squizlabs/php_codesniffer": "^3.10",
+		"wp-coding-standards/wpcs": "^3.1"
+	},
+	"config": {
+		"allow-plugins": {
+			"dealerdirect/phpcodesniffer-composer-installer": true
+		}
+	},
+	"scripts": {
+		"phpcs": "phpcs --standard=WordPress --runtime-set testVersion 7.4-",
+		"phpcbf": "phpcbf --standard=WordPress --runtime-set testVersion 7.4-"
+	}
+}

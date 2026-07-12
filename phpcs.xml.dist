@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<ruleset name="wc-product-sync">
+	<description>WC Product Sync — PHP Coding Standards Ruleset</description>
+
+	<!-- File to lint -->
+	<file>wc-product-sync.php</file>
+
+	<!-- Exclude composer/vendor files (if present) -->
+	<exclude-pattern>/vendor/*</exclude-pattern>
+
+	<!-- PHP version target -->
+	<config name="testVersion" value="7.4-"/>
+
+	<!-- Use WordPress Core + WooCommerce standards -->
+	<rule ref="WordPress">
+		<!-- Exclude overly strict rules for single-file plugin context -->
+		<exclude name="Generic.Files.LineLength.TooLong"/>
+		<exclude name="WordPress.PHP.YodaConditions.NotYoda"/>
+	</rule>
+
+	<!-- Also check WooCommerce-specific standards if WPCS includes them -->
+	<rule ref="WordPress.WP.Capabilities">
+		<properties>
+			<property name="custom_capabilities" type="array">
+				<element value="manage_woocommerce"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!-- Warn about missing text domain -->
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array" value="wc-product-sync"/>
+		</properties>
+	</rule>
+
+	<!-- Require $wpdb->prepare() for all queries -->
+	<rule ref="WordPress.DB.PreparedSQL.NotPrepared"/>
+	<rule ref="WordPress.DB.PreparedSQL.InterpolatedNotPrepared"/>
+
+	<!-- Require sanitization/escaping -->
+	<rule ref="WordPress.Security.EscapeOutput"/>
+	<rule ref="WordPress.Security.NonceVerification"/>
+	<rule ref="WordPress.Security.ValidatedSanitizedInput"/>
+</ruleset>
