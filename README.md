@@ -212,6 +212,14 @@ define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://twoj-serwer.pl/wc-product-sync/up
 
 Bez tej stałej updater jest **całkowicie wyłączony** (żadnych zapytań HTTP).
 
+**Prywatne repozytorium (Forgejo/Gitea)** — jeśli `update.json` i ZIP są za autoryzacją, dodaj token dostępu (uprawnienie do odczytu repozytorium):
+
+```php
+define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' );
+```
+
+Token jest dołączany jako nagłówek `Authorization: token …` **wyłącznie** do żądań na host z `UPDATE_URL` — zarówno do pobrania `update.json`, jak i samego ZIP-a (który ściąga rdzeń WordPressa). Dzięki ograniczeniu do jednego hosta token nigdy nie trafia do innego serwera.
+
 **Hosting** — pod tym URL-em serwuj plik `update.json`, a `download_url` musi wskazywać wersjonowany ZIP:
 
 ```json
@@ -237,7 +245,10 @@ WPS_UPDATE_BASE_URL=https://twoj-serwer.pl/wc-product-sync ./build.sh
 
 ## Zmiany (Changelog)
 
-### 0.9.21 (current) — aktualizacje z własnego serwera
+### 0.9.22 (current) — token dla prywatnego serwera aktualizacji
+- **Obsługa tokenu w updaterze:** stała `WC_PRODUCT_SYNC_UPDATE_TOKEN` pozwala pobierać `update.json` i ZIP z prywatnego repozytorium (Forgejo/Gitea). Nagłówek `Authorization: token …` dołączany jest tylko do żądań na host z `UPDATE_URL` (również do pobrania ZIP-a realizowanego przez rdzeń WP przez filtr `http_request_args`), więc token nie wycieka do innych serwerów.
+
+### 0.9.21 — aktualizacje z własnego serwera
 - **Updater z własnego serwera (opcjonalny):** po ustawieniu stałej `WC_PRODUCT_SYNC_UPDATE_URL` nowe wersje pojawiają się w panelu **Wtyczki → Aktualizuj** (aktualizacja jednym kliknięciem, bez ponownego wgrywania ZIP-a). Bez tej stałej mechanizm jest w pełni wyłączony (żadnych zapytań HTTP). Szczegóły: sekcja „Aktualizacje z własnego serwera".
 - `build.sh` generuje teraz obok ZIP-a plik `dist/update.json` (metadane dla updatera) na podstawie nagłówka wtyczki.
 

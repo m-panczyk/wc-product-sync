@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.21
+ * Version:           0.9.22
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -27,6 +27,9 @@
  * Aktualizacje z własnego serwera (opcjonalne): wskaż URL do metadanych JSON, aby aktualizacje
  * pojawiały się w panelu WordPress (Wtyczki → Aktualizuj). Bez tej stałej updater jest wyłączony.
  *   define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://twoj-serwer.pl/wc-product-sync/update.json' );
+ * Prywatne repozytorium (Forgejo/Gitea) — dodaj token dostępu; jest dołączany jako nagłówek
+ * `Authorization: token …` wyłącznie do żądań na host z UPDATE_URL (do update.json i pobrania ZIP-a):
+ *   define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' );
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -119,6 +122,8 @@ final class WC_Product_Sync {
 		add_filter( 'pre_set_site_transient_update_plugins', array( $this, 'inject_update' ) );
 		add_filter( 'plugins_api', array( $this, 'update_details' ), 20, 3 );
 		add_action( 'upgrader_process_complete', array( $this, 'flush_update_cache' ), 10, 2 );
+		// Authenticate the ZIP download (done by WP core, not our code) for private update servers.
+		add_filter( 'http_request_args', array( $this, 'authorize_update_request' ), 10, 2 );
 	}
 
 	/** Load the plugin's translations from /languages. */
@@ -2791,6 +2796,39 @@ $defaults = array(
 		return trim( (string) apply_filters( 'wps_update_url', $url ) );
 	}
 
+	/** Access token for a private update server (Forgejo/Gitea). Empty = anonymous. */
+	private function update_token() {
+		$t = defined( 'WC_PRODUCT_SYNC_UPDATE_TOKEN' ) ? WC_PRODUCT_SYNC_UPDATE_TOKEN : '';
+		return trim( (string) apply_filters( 'wps_update_token', $t ) );
+	}
+
+	/** Host of the configured update URL — used to scope the auth token to that server only. */
+	private function update_host() {
+		$url = $this->update_url();
+		return $url ? strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) ) : '';
+	}
+
+	/** Attach the update-server token to requests aimed at that host — notably the ZIP download WP
+	 *  core performs via download_url(), which our code never touches. Scoped strictly to the update
+	 *  host so the token is never sent to any other server, and never clobbers an existing header. */
+	public function authorize_update_request( $args, $url ) {
+		$token = $this->update_token();
+		if ( '' === $token ) {
+			return $args;
+		}
+		$host = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+		if ( '' === $host || $host !== $this->update_host() ) {
+			return $args;
+		}
+		if ( ! isset( $args['headers'] ) || ! is_array( $args['headers'] ) ) {
+			$args['headers'] = array();
+		}
+		if ( empty( $args['headers']['Authorization'] ) ) {
+			$args['headers']['Authorization'] = 'token ' . $token;
+		}
+		return $args;
+	}
+
 	/** This plugin's installed version, read from the header (single source of truth). */
 	private function current_version() {
 		$data = get_file_data( __FILE__, array( 'Version' => 'Version' ) );
@@ -2811,7 +2849,12 @@ $defaults = array(
 				return empty( $cached['version'] ) ? null : $cached; // array() = negative cache
 			}
 		}
-		$res = wp_remote_get( $url, array( 'timeout' => 15, 'headers' => array( 'Accept' => 'application/json' ) ) );
+		$headers = array( 'Accept' => 'application/json' );
+		$token   = $this->update_token();
+		if ( '' !== $token ) {
+			$headers['Authorization'] = 'token ' . $token; // private repo (Forgejo/Gitea)
+		}
+		$res = wp_remote_get( $url, array( 'timeout' => 15, 'headers' => $headers ) );
 		if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
 			set_transient( self::UPDATE_TRANSIENT, array(), 2 * HOUR_IN_SECONDS );
 			return null;

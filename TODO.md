@@ -106,6 +106,17 @@
 
 ---
 
+## ✅ Completed (v0.9.22 — private update server token)
+
+- **Token auth for the updater.** `WC_PRODUCT_SYNC_UPDATE_TOKEN` (constant / `wps_update_token` filter)
+  lets the updater reach a private Forgejo/Gitea repo. The JSON fetch adds `Authorization: token …`
+  directly; the ZIP download (performed by WP core, not our code) is authorized via an
+  `http_request_args` filter **scoped strictly to the UPDATE_URL host** — the token never leaks to any
+  other server and never clobbers a pre-set Authorization header. Empty token → unchanged anonymous
+  behavior.
+
+---
+
 ## ✅ Completed (v0.9.21 — self-hosted updates)
 
 - **Self-hosted JSON updater** (opt-in via `WC_PRODUCT_SYNC_UPDATE_URL`). Filters
