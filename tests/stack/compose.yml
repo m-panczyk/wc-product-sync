@@ -1,0 +1,110 @@
+# Ephemeral WooCommerce source + target for hermetic e2e tests.
+#
+# Two complete stores on one network. The target reaches the source by service DNS
+# (http://src-wp), so nothing here depends on the LAN rig, on SSH, or on secrets —
+# it runs identically on a laptop and in CI.
+#
+#   tests/stack/up.sh      bring up + install WP/WC + generate REST keys + install plugin
+#   tests/stack/seed.sh    populate the source with a deterministic catalog
+#   tests/stack/down.sh    destroy everything, volumes included
+name: wps-e2e
+
+x-db: &db
+  image: mariadb:10.11
+  environment:
+    MARIADB_ROOT_PASSWORD: root
+    MARIADB_DATABASE: wordpress
+    MARIADB_USER: wordpress
+    MARIADB_PASSWORD: wordpress
+  healthcheck:
+    test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+    interval: 5s
+    timeout: 5s
+    retries: 20
+
+x-wp: &wp
+  # Pinned, not :latest — an image bump must be a visible commit, not a silent
+  # change under a green CI run. Current WooCommerce requires WP >= 6.9.
+  image: wordpress:6.9-apache
+  healthcheck:
+    test: ['CMD', 'curl', '-fsS', 'http://localhost/']
+    interval: 5s
+    timeout: 5s
+    retries: 30
+
+x-cli: &cli
+  image: wordpress:cli-php8.2
+  user: '33:33'
+  # Idle; every command runs via `docker compose exec`.
+  entrypoint: ['tail', '-f', '/dev/null']
+
+services:
+  src-db:
+    <<: *db
+    volumes: [src-db-data:/var/lib/mysql]
+
+  src-wp:
+    <<: *wp
+    depends_on:
+      src-db: {condition: service_healthy}
+    environment:
+      WORDPRESS_DB_HOST: src-db
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+    volumes:
+      - src-wp-data:/var/www/html
+      # Undoes the https:// URLs that the wp-config is_ssl() shim would otherwise
+      # produce — see mu/00-e2e-http-urls.php.
+      - ./mu:/var/www/html/wp-content/mu-plugins:ro
+    ports: ['8081:80']
+
+  src-cli:
+    <<: *cli
+    depends_on:
+      src-wp: {condition: service_healthy}
+    environment:
+      HOME: /tmp          # www-data has no home; wp-cli warns on every call without it
+      WORDPRESS_DB_HOST: src-db
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+    volumes: [src-wp-data:/var/www/html]
+
+  tgt-db:
+    <<: *db
+    volumes: [tgt-db-data:/var/lib/mysql]
+
+  tgt-wp:
+    <<: *wp
+    depends_on:
+      tgt-db: {condition: service_healthy}
+    environment:
+      WORDPRESS_DB_HOST: tgt-db
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+    volumes: [tgt-wp-data:/var/www/html]
+    ports: ['8082:80']
+
+  tgt-cli:
+    <<: *cli
+    depends_on:
+      tgt-wp: {condition: service_healthy}
+    environment:
+      HOME: /tmp
+      WORDPRESS_DB_HOST: tgt-db
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+    volumes:
+      - tgt-wp-data:/var/www/html
+      # The built ZIP, so the target installs the REAL distributable artifact
+      # rather than a bind-mounted working tree.
+      - ../../dist:/dist:ro
+
+volumes:
+  src-db-data:
+  src-wp-data:
+  tgt-db-data:
+  tgt-wp-data:

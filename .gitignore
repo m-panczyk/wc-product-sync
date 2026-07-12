@@ -12,3 +12,4 @@ metrics/*.csv
 !**/README.md
 !docs/PERFORMANCE.md
 *.txt
+tests/stack/.env
