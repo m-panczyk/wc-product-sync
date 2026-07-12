@@ -65,6 +65,36 @@ START_RFC=$(date -u -d "@$START_S" +%Y-%m-%dT%H:%M:%SZ); END_RFC=$(date -u -d "@
 PEAKCPU=$(flux "from(bucket:\"tests\")|>range(start:$START_RFC,stop:$END_RFC)|>filter(fn:(r)=>r.role==\"target\" and r._measurement==\"cpu\" and r._field==\"usage_active\")|>max()")
 echo "target peak CPU during run: ${PEAKCPU:-n/a}%"
 
+# Performance regression check (best-effort, never fails the run).
+check_regression() {
+  local dur="$DUR" base_ver="baseline-v${VERSION}"
+  [ -f "$CSV" ] || return 0
+  # Find historical median duration for runs with label starting with "baseline-" + same version.
+  # If no exact-version baseline exists, fall back to all baseline runs as a soft check.
+  local med
+  med=$(awk -F',' -v ver="$VERSION" 'NR>1 && $3~/^baseline-v/'"$ver"'/{print $4}' "$CSV" | sort -n)
+  if [ -z "$med" ]; then
+    # No version-specific baseline yet; check against all baselines as soft warning.
+    med=$(awk -F',' 'NR>1 && $3~/^baseline-/{print $4}' "$CSV" | sort -n)
+    echo "WARN: no version-specific baseline found, falling back to all-baseline median" >&2
+  fi
+  [ -z "$med" ] && return 0
+  # Compute median (middle value of sorted list).
+  local n_lines; n_lines=$(echo "$med" | wc -l)
+  local mid=$(( (n_lines + 1) / 2 ))
+  local median; median=$(echo "$med" | sed -n "${mid}p")
+  [ -z "$median" ] && return 0
+  # Check if current duration exceeds 1.5x the median (30% slowdown threshold).
+  local exceeded
+  exceeded=$(awk "BEGIN {print ($dur > $median * 1.5) ? 1 : 0}")
+  if [ "$exceeded" = "1" ]; then
+    echo "PERF_REGRESSION: duration=${dur}s exceeds 1.5x median (${median}s) — possible regression" >&2
+  else
+    echo "PERF_OK: duration=${dur}s within threshold of median (${median}s)" >&2
+  fi
+}
+check_regression
+
 [ -f "$CSV" ] || echo "started_at,version,label,duration_s,batches,created,updated,skipped,errors,products,target_peak_cpu" > "$CSV"
 echo "$START_RFC,$VERSION,$LABEL,$DUR,$n,$C,$U,$S,$E,$PROD,${PEAKCPU:-}" >> "$CSV"
 echo "logged -> $CSV"
