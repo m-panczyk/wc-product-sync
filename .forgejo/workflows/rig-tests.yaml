@@ -26,6 +26,14 @@ jobs:
     outputs:
       rig_up: ${{ steps.gate.outputs.up }}
     steps:
+      # node:20-bookworm has no ssh client; the rig scripts SSH to the QNAP and the
+      # source box, and use python3/curl for Influx + Grafana emits.
+      - name: Toolchain
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            openssh-client python3 curl >/dev/null
+
       - uses: actions/checkout@v4
 
       - name: Install rig SSH key
@@ -102,6 +110,14 @@ jobs:
     if: needs.parity.outputs.rig_up == 'true' && (github.event_name == 'schedule' || inputs.run_perf)
     runs-on: self-hosted
     steps:
+      # node:20-bookworm has no ssh client; the rig scripts SSH to the QNAP and the
+      # source box, and use python3/curl for Influx + Grafana emits.
+      - name: Toolchain
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            openssh-client python3 curl >/dev/null
+
       - uses: actions/checkout@v4
 
       - name: Install rig SSH key

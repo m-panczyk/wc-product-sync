@@ -16,6 +16,15 @@ jobs:
   lint:
     runs-on: self-hosted
     steps:
+      # The runner label maps to node:20-bookworm (node is required by checkout).
+      # php/zip are not in that image; install what the build and lint actually use.
+      # TODO: bake these into a CI image and drop this step.
+      - name: Toolchain
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            php-cli zip unzip >/dev/null
+
       - uses: actions/checkout@v4
 
       - name: PHP syntax
