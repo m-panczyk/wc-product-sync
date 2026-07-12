@@ -1,0 +1,48 @@
+name: Release
+
+# Tag v<version> -> build the ZIP, attach it to that tag's release, and swap update.json
+# on the moving `latest` release (the URL every store's updater polls).
+#
+# publish.sh refuses to run when the tag and the plugin header disagree, so a mistyped
+# bump fails here rather than shipping metadata that points at the wrong package.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)publish, e.g. v0.9.23'
+        required: true
+
+concurrency:
+  group: wps-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: PHP syntax
+        run: php -l wc-product-sync.php
+
+      - name: Build and publish
+        env:
+          # A PAT with repo write access; falls back to the automatic per-run token.
+          FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          FORGEJO_URL: ${{ github.server_url }}
+          FORGEJO_REPO: ${{ github.repository }}
+        run: ./publish.sh "${{ inputs.tag || github.ref_name }}"
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist/*.zip
+            dist/update.json
+          if-no-files-found: warn

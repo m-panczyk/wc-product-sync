@@ -1,0 +1,39 @@
+name: CI
+
+# Cheap, hermetic checks: no rig, no network, no side effects. Safe on every push.
+# Anything that touches the live rig lives in rig-tests.yaml (manual/scheduled).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PHP syntax
+        run: |
+          php -l wc-product-sync.php
+          for f in tests/*.php; do php -l "$f"; done
+
+      - name: Shell syntax
+        run: |
+          for f in build.sh publish.sh tests/*.sh; do bash -n "$f"; done
+
+      # Builds the real package. Catches a broken INCLUDE list (e.g. a file that
+      # exists locally but was never committed) before it reaches a release.
+      - name: Package builds
+        run: ./build.sh
+
+      - name: Plugin header version is sane
+        run: |
+          v="$(grep -m1 -oE 'Version:[[:space:]]*[0-9.]+' wc-product-sync.php | grep -oE '[0-9.]+')"
+          [ -n "$v" ] || { echo "::error::no Version in plugin header"; exit 1; }
+          echo "version=$v"

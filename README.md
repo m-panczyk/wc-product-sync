@@ -325,13 +325,28 @@ nie będzie działał.
 
 ### Publikacja nowej wersji
 
-1. **Podnieś `Version`** w nagłówku `wc-product-sync.php` i dopisz wpis do sekcji „Zmiany (Changelog)".
-2. **Zbuduj** z `WPS_UPDATE_BASE_URL` ustawionym na ścieżkę nowego tagu (jak wyżej).
-3. **Utwórz wydanie `v<wersja>`** w Forgejo i załącz do niego **`dist/wc-product-sync-<wersja>.zip`**
-   (opcjonalnie też `update.json`, dla porządku).
-4. **Podmień `update.json` w wydaniu `latest`** — usuń stary załącznik, wgraj nowy `dist/update.json`.
-   **To jest krok, który faktycznie publikuje aktualizację** — dopóki go nie zrobisz, sklepy nadal
-   widzą poprzednią wersję.
+Publikacja jest zautomatyzowana — **wydanie robi tag**:
+
+1. **Podnieś `Version`** w nagłówku `wc-product-sync.php` i dopisz wpis do „Zmiany (Changelog)".
+2. **Otaguj i wypchnij:**
+
+```bash
+git tag v0.9.23 && git push forgejo v0.9.23
+```
+
+Tag `v*` uruchamia workflow **Release** (`.forgejo/workflows/release.yaml`), który woła `publish.sh`:
+buduje ZIP-a, tworzy wydanie `v0.9.23` z załącznikiem, a na koniec **podmienia `update.json`
+w wydaniu `latest`** — to ten ostatni krok faktycznie publikuje aktualizację dla sklepów.
+
+`publish.sh` **odmawia publikacji, gdy tag nie zgadza się z wersją w nagłówku wtyczki** (`v0.9.23` ↔
+`Version: 0.9.23`) — literówka w bumpie wywala się na CI, zamiast wypchnąć metadane wskazujące na złą
+paczkę.
+
+To samo ręcznie (gdy runner nie działa):
+
+```bash
+FORGEJO_TOKEN=xxx ./publish.sh v0.9.23
+```
 
 Metadane są cache'owane po stronie sklepu **12 h** (sukces) / **2 h** (błąd serwera), więc nowa wersja
 pojawi się w panelu w ciągu doby, a niedostępny serwer nigdy nie spowalnia panelu. Cache jest
@@ -406,6 +421,32 @@ Wtyczka jest rozwijana wewnętrznie. W przypadku problemów zaloguj się na **sk
 ---
 
 ## Testing
+
+### CI/CD (Forgejo Actions)
+
+Workflows żyją w **`.forgejo/workflows/`** (jedyny katalog — Forgejo czyta właśnie ten):
+
+| Workflow | Wyzwalacz | Co robi |
+|---|---|---|
+| `ci.yaml` | push do `main`, PR | `php -l`, `bash -n`, **próbne zbudowanie paczki** (`./build.sh`). Bez rigu, bez efektów ubocznych. |
+| `rig-tests.yaml` | nocny cron + ręcznie | Parity (price → stock) i benchmark wydajności na **żywym rigu**. |
+| `release.yaml` | tag `v*` | `publish.sh` — buduje ZIP, tworzy wydanie, podmienia `update.json` w `latest`. |
+
+**Dlaczego testy rigowe nie chodzą na każdym pushu:** mutują produkty na **żywym sklepie źródłowym**
+i uruchamiają realny sync na celu. Wtyczka ma globalną blokadę synchronizacji (`wps_sync_running`,
+pełny i szybki sync wykluczają się), więc równoległe joby wygryzałyby się nawzajem o tę blokadę i dawały
+losowe czerwone buildy. Dlatego: `concurrency: wps-rig` (jeden przebieg na raz), `needs:` (perf dopiero
+po parity) oraz price/stock jako **kolejne kroki**, nie równoległe joby.
+
+**Sekrety** (Settings → Actions → Secrets). Testy rigowe generują z nich `tests/perf.env`, bo skrypty
+robią `source tests/perf.env`, a plik jest gitignorowany:
+
+`QNAP_SSH`, `QNAP_DOCKER`, `QNAP_PROJECT`, `GRAFANA`, `GRAFANA_TOKEN`, `INFLUX`, `INFLUX_ORG`,
+`INFLUX_TOKEN`, `SRC_SSH`, `SRC_CONTAINER`, `SRC_PROJECT` — plus `RIG_SSH_KEY` i `RIG_KNOWN_HOSTS`
+(klucz SSH runnera do QNAP-a i źródła) oraz `RELEASE_TOKEN` (token z prawem zapisu do repo; bez niego
+release używa automatycznego tokenu przebiegu).
+
+**Wymagania runnera:** `php-cli`, `python3`, `curl`, `zip`, `unzip`, `ssh` na hoście runnera.
 
 ### Smoke test (plugin loading)
 
