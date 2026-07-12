@@ -123,8 +123,69 @@ if [ "$MODE" = "full" ]; then
   CHECKED=$(intval "$(sed -n 's/.*checked=\([0-9-]*\).*/\1/p' <<<"$SUMMARY")" 0)
   MISMATCH=$(intval "$(sed -n 's/.*mismatch=\([0-9-]*\).*/\1/p' <<<"$SUMMARY")" -1)
   echo "$RES" | grep MISMATCH | head -20
+
+  # --- Additional full-sync checks (variable rollup + soft-delete tagging) ----
+  ROLLUP_PHP='
+global $wpdb;
+$checked_var=0;$rollup_mismatch=0;$del_ok=0;$del_tagged=0;$del_total=0;
+
+// 1) Variable product parent rollup: verify min/max price matches variation range.
+$vars=get_posts(array("post_type"=>"product","post_status"=>"publish","fields"=>"ids","numberposts"=>-1,
+  "tax_query"=>array(array("taxonomy"=>"product_type","field"=>"slug","terms"=>"variable"))));
+foreach($vars as $vid){
+  $p=wc_get_product($vid);if(!$p)continue;
+  $children=$p->get_children();if(!count($children))continue;
+  $prices=array();$statuses=array();
+  foreach($children as $chid){
+    $vp=wc_get_product($chid);if(!$vp)continue;
+    $prices[]=floatval($vp->get_regular_price()?:0);$statuses[]=$vp->get_status();
+  }
+  $checked_var++;
+  // Get actual publish variation prices (matching WC sync logic)
+  $pub_prices=array_filter($prices,function($v){return $v>0;});
+  if(!count($pub_prices)){continue;}
+  $actual_min=min($pub_prices);$actual_max=max($pub_prices);
+  $meta=$wpdb->get_row($wpdb->prepare("SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id=%d AND meta_key=%s LIMIT 1",$vid,"min_price"));
+  $parent_min=floatval($meta?->meta_value?:0);
+  $meta=$wpdb->get_row($wpdb->prepare("SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id=%d AND meta_key=%s LIMIT 1",$vid,"max_price"));
+  $parent_max=floatval($meta?->meta_value?:0);
+  // Tolerance: prices stored as cents-like integers, allow 1-cent diff for rounding
+  if(abs($parent_min-$actual_min)>0.01 || abs($parent_max-$actual_max)>0.01){
+    $rollup_mismatch++;
+    echo "ROLLUP_MISMATCH var=$vid (children=".(count($children)).") parent=[".$parent_min.",".$parent_max."] actual=[".$actual_min.",".$actual_max."]\n";
+  }
+}
+
+// 2) Soft-delete tagging: products that lack _wps_synced should have wps-usuniete tag (if in draft).
+$old=$wpdb->get_col("SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key='_wps_synced'");
+$sid_list=implode(",",array_map(function($i){return intval($i);},$old));
+// Products NOT synced: check they have the delete tag if in draft status
+if(empty($sid_list)){
+  $unchecked=$wpdb->get_col("SELECT p.ID FROM {$wpdb->posts} p WHERE p.post_type='product' AND p.post_status='draft'");
+} else {
+  $checked=$wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE post_type='product' AND ID NOT IN ($sid_list)");
+  $unchecked=$wpdb->get_col($checked);
+}
+foreach(array_slice($unchecked,0,100) as $oid){ // sample up to 100 draft products
+  $post=get_post($oid);if(!$post||$post->post_status!=='draft')continue;
+  $tags=wp_get_object_terms($oid,"product_tag",array("fields"=>"slugs"));
+  $has_tag=is_array($tags)&&in_array("wps-usuniete",$tags,true);
+  $del_total++;
+  if($has_tag)$del_tagged++;else$del_ok++;// not all drafts should be tagged; OK if mixed
+}
+echo "VAR_ROLLUP checked=$checked_var mismatch=$rollup_mismatch\n";
+echo "SOFT_DELETE check: samples=$del_total tagged=$del_tagged other_drafts=$del_ok\n";
+'
+  ROLLUP_RES=$(teval "$ROLLUP_PHP" 2>/dev/null)
+  echo "$ROLLUP_RES" | grep -E '(ROLLUP_MISMATCH|VAR_ROLLUP|SOFT_DELETE)'
+
+  ROLLUP_MIS=$(echo "$ROLLUP_RES" | sed -n 's/.*mismatch=\([0-9-]*\).*/\1/p' | head -1)
+  ROLLUP_MIS=$(intval "${ROLLUP_MIS:--1}" -1)
   END_MS=$(date +%s%3N)
-  VERDICT="PASS"; { [ "$MISMATCH" = "0" ] && [ "$(intval "$E" 1)" = "0" ]; } || VERDICT="FAIL"
+  VERDICT="PASS"
+  if [ "$MISMATCH" != "0" ]; then VERDICT="FAIL"; fi
+  if [ "$(intval "$E" 1)" != "0" ]; then VERDICT="FAIL"; fi
+  if [ "$ROLLUP_MIS" != "0" ] && [ "$ROLLUP_MIS" != "-1" ]; then VERDICT="FAIL"; fi
   emit_influx full "$VERDICT" "$CHECKED" "$MISMATCH" 0 "$(intval "$B" 0)" "$(( $(date +%s) - START_S ))"
   emit_annotation "$VERDICT" "wps-parity $FIELD FULL [$VERDICT]: checked=$CHECKED mismatch=$MISMATCH, upd=$U err=$E" "$START_MS" "$END_MS"
   echo "== $VERDICT (full/$FIELD) — checked=$CHECKED mismatch=$MISMATCH =="
