@@ -200,9 +200,48 @@ Sprawdź w WooCommerce → Ustawienia → Zaawansowane → REST API czy Consumer
 
 ---
 
+## Aktualizacje z własnego serwera
+
+Opcjonalny mechanizm: nowe wersje pojawiają się w **Wtyczki → Aktualizuj** (jak wtyczki z wordpress.org), aktualizacja jednym kliknięciem — bez ponownego wgrywania ZIP-a.
+
+**Włączenie** — dodaj do `wp-config.php` na sklepie docelowym:
+
+```php
+define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://twoj-serwer.pl/wc-product-sync/update.json' );
+```
+
+Bez tej stałej updater jest **całkowicie wyłączony** (żadnych zapytań HTTP).
+
+**Hosting** — pod tym URL-em serwuj plik `update.json`, a `download_url` musi wskazywać wersjonowany ZIP:
+
+```json
+{
+  "version": "0.9.21",
+  "requires": "6.0",
+  "requires_php": "7.4",
+  "tested": "6.7",
+  "download_url": "https://twoj-serwer.pl/wc-product-sync/wc-product-sync-0.9.21.zip",
+  "sections": { "changelog": "…" }
+}
+```
+
+`build.sh` generuje ten plik automatycznie do `dist/update.json` (host ustawisz zmienną `WPS_UPDATE_BASE_URL`):
+
+```bash
+WPS_UPDATE_BASE_URL=https://twoj-serwer.pl/wc-product-sync ./build.sh
+```
+
+**Publikacja nowej wersji:** podnieś `Version` w nagłówku wtyczki → `./build.sh` → wgraj `dist/wc-product-sync-<wersja>.zip` i `dist/update.json` na serwer. Metadane są cache'owane 12 h (sukces) / 2 h (błąd serwera), więc niedostępny serwer nie spowalnia panelu.
+
+---
+
 ## Zmiany (Changelog)
 
-### 0.9.20 (current) — naprawa force-full (utrata danych / brak działania)
+### 0.9.21 (current) — aktualizacje z własnego serwera
+- **Updater z własnego serwera (opcjonalny):** po ustawieniu stałej `WC_PRODUCT_SYNC_UPDATE_URL` nowe wersje pojawiają się w panelu **Wtyczki → Aktualizuj** (aktualizacja jednym kliknięciem, bez ponownego wgrywania ZIP-a). Bez tej stałej mechanizm jest w pełni wyłączony (żadnych zapytań HTTP). Szczegóły: sekcja „Aktualizacje z własnego serwera".
+- `build.sh` generuje teraz obok ZIP-a plik `dist/update.json` (metadane dla updatera) na podstawie nagłówka wtyczki.
+
+### 0.9.20 — naprawa force-full (utrata danych / brak działania)
 - **[krytyczne] Force-full działał tylko pozornie:** kasowanie było bramkowane warunkiem „pierwszy batch", a wykonywane dopiero po zakończeniu przebiegu. Dla katalogów dzielonych na batche (koniec wypada na batchu wznowienia) **nigdy się nie uruchamiało**; dla katalogów mieszczących się w jednym batchu **kasowało właśnie zsynchronizowane produkty** (zapytanie usuwało *wszystkie* rekordy z `_wps_synced`, w tym te odświeżone w tym przebiegu).
 - **Naprawa:** force-full usuwa teraz **wyłącznie** produkty, których **nie** odświeżono w bieżącym przebiegu — porównując znacznik `_wps_synced` ze znacznikiem startu przebiegu (`SELECT ... WHERE meta_key='_wps_synced' AND CAST(meta_value AS UNSIGNED) < <start>`). Znacznik startu jest utrwalany w `wps_last_sync_result` i przeżywa batche wznowienia, więc kasacja jest spójna dla katalogów jedno- i wielobatchowych.
 - **Bezpiecznik:** brak wiarygodnego znacznika startu → kasacja **pomijana** (nigdy „na wszelki wypadek"). Nadal wymaga bezbłędnego pobrania całego katalogu. Usunięcia trafiają do raportu (`hard_deleted`).

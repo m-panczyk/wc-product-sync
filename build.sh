@@ -36,3 +36,29 @@ rm -rf "$STAGE"
 
 echo "Built $ZIP"
 unzip -l "$ZIP"
+
+# --- Self-hosted update metadata -----------------------------------------------------------------
+# Emit dist/update.json for the in-plugin updater (WC_PRODUCT_SYNC_UPDATE_URL). Host this file AND
+# the zip at $WPS_UPDATE_BASE_URL; the plugin's download_url must serve THIS versioned zip.
+# Override the host with:  WPS_UPDATE_BASE_URL=https://your-host/wc-product-sync ./build.sh
+BASE_URL="${WPS_UPDATE_BASE_URL:-https://EXAMPLE.invalid/wc-product-sync}"
+REQUIRES="$(grep -m1 -oE 'Requires at least:[[:space:]]*[0-9.]+' "$SLUG.php" | grep -oE '[0-9.]+' || true)"
+REQUIRES_PHP="$(grep -m1 -oE 'Requires PHP:[[:space:]]*[0-9.]+' "$SLUG.php" | grep -oE '[0-9.]+' || true)"
+cat > dist/update.json <<JSON
+{
+  "name": "WC Product Sync (SKU)",
+  "slug": "wc-product-sync",
+  "version": "$VERSION",
+  "requires": "${REQUIRES:-6.0}",
+  "requires_php": "${REQUIRES_PHP:-7.4}",
+  "tested": "${WPS_TESTED:-6.7}",
+  "author": "Michał Pańczyk",
+  "homepage": "$BASE_URL",
+  "last_updated": "$(date -u +%F)",
+  "download_url": "$BASE_URL/$SLUG-$VERSION.zip",
+  "sections": {
+    "changelog": "Pełna lista zmian w README.md (sekcja \"Zmiany (Changelog)\")."
+  }
+}
+JSON
+echo "Wrote dist/update.json  →  download_url: $BASE_URL/$SLUG-$VERSION.zip"

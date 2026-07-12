@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.20
+ * Version:           0.9.21
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -23,6 +23,10 @@
  *   define( 'WC_PRODUCT_SYNC_SOURCE_URL', 'https://zrodlo.pl' );
  *   define( 'WC_PRODUCT_SYNC_CK', 'ck_xxx' );
  *   define( 'WC_PRODUCT_SYNC_CS', 'cs_xxx' );
+ *
+ * Aktualizacje z własnego serwera (opcjonalne): wskaż URL do metadanych JSON, aby aktualizacje
+ * pojawiały się w panelu WordPress (Wtyczki → Aktualizuj). Bez tej stałej updater jest wyłączony.
+ *   define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://twoj-serwer.pl/wc-product-sync/update.json' );
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -44,6 +48,7 @@ final class WC_Product_Sync {
 	const SYNC_KEYS_TRANSIENT  = 'wps_sync_source_keys'; // Accumulated source SKUs/names across batches (for soft-delete)
 	const SYNC_LAST_REPORT     = 'wps_last_sync_report'; // Per-item report of the last run (what/how/why)
 	const REPORT_BUCKET_CAP    = 500;                    // Max items stored per bucket (counts stay exact)
+	const UPDATE_TRANSIENT     = 'wps_update_info';       // cached self-hosted update metadata (JSON)
 
 	// Soft-delete
 	const META_SYNCED       = '_wps_synced';
@@ -109,6 +114,11 @@ final class WC_Product_Sync {
 		// IP: WP's SSRF guard (wp_http_validate_url) otherwise blocks download_url() for
 		// RFC1918 hosts, so products would sync without images against a LAN/staging source.
 		add_filter( 'http_request_host_is_external', array( $this, 'allow_source_host' ), 10, 2 );
+		// Self-hosted updates (opt-in via WC_PRODUCT_SYNC_UPDATE_URL): surface a new release in the
+		// WordPress Plugins screen + "View details" modal, so updating is one click — no re-upload.
+		add_filter( 'pre_set_site_transient_update_plugins', array( $this, 'inject_update' ) );
+		add_filter( 'plugins_api', array( $this, 'update_details' ), 20, 3 );
+		add_action( 'upgrader_process_complete', array( $this, 'flush_update_cache' ), 10, 2 );
 	}
 
 	/** Load the plugin's translations from /languages. */
@@ -2770,6 +2780,118 @@ $defaults = array(
 		}
 	}
 
+	/* =====================================================================
+	 *  Aktualizacje z własnego serwera (self-hosted JSON updater)
+	 * ================================================================== */
+
+	/** Update-metadata endpoint. Empty (constant undefined) → updater fully disabled: no HTTP calls,
+	 *  no filters do anything. Overridable via the `wps_update_url` filter. */
+	private function update_url() {
+		$url = defined( 'WC_PRODUCT_SYNC_UPDATE_URL' ) ? WC_PRODUCT_SYNC_UPDATE_URL : '';
+		return trim( (string) apply_filters( 'wps_update_url', $url ) );
+	}
+
+	/** This plugin's installed version, read from the header (single source of truth). */
+	private function current_version() {
+		$data = get_file_data( __FILE__, array( 'Version' => 'Version' ) );
+		return ! empty( $data['Version'] ) ? $data['Version'] : '0';
+	}
+
+	/** Fetch + cache the remote update metadata (JSON). Cached 12h on success, 2h on failure
+	 *  (negative cache) so a down server never hammers on every admin page load. Returns the decoded
+	 *  array, or null when the updater is disabled / the payload is unusable. */
+	private function remote_update_info( $force = false ) {
+		$url = $this->update_url();
+		if ( '' === $url ) {
+			return null;
+		}
+		if ( ! $force ) {
+			$cached = get_transient( self::UPDATE_TRANSIENT );
+			if ( is_array( $cached ) ) {
+				return empty( $cached['version'] ) ? null : $cached; // array() = negative cache
+			}
+		}
+		$res = wp_remote_get( $url, array( 'timeout' => 15, 'headers' => array( 'Accept' => 'application/json' ) ) );
+		if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
+			set_transient( self::UPDATE_TRANSIENT, array(), 2 * HOUR_IN_SECONDS );
+			return null;
+		}
+		$data = json_decode( wp_remote_retrieve_body( $res ), true );
+		if ( ! is_array( $data ) || empty( $data['version'] ) ) {
+			set_transient( self::UPDATE_TRANSIENT, array(), 2 * HOUR_IN_SECONDS );
+			return null;
+		}
+		set_transient( self::UPDATE_TRANSIENT, $data, 12 * HOUR_IN_SECONDS );
+		return $data;
+	}
+
+	/** Inject an available update into WP's plugin-update transient so the Plugins screen shows it. */
+	public function inject_update( $transient ) {
+		if ( ! is_object( $transient ) ) {
+			return $transient;
+		}
+		$info = $this->remote_update_info();
+		if ( empty( $info['version'] ) ) {
+			return $transient;
+		}
+		$basename = plugin_basename( __FILE__ );
+		$current  = $this->current_version();
+		if ( ! empty( $info['download_url'] ) && version_compare( $info['version'], $current, '>' ) ) {
+			$transient->response[ $basename ] = (object) array(
+				'slug'         => 'wc-product-sync',
+				'plugin'       => $basename,
+				'new_version'  => $info['version'],
+				'url'          => $info['homepage'] ?? '',
+				'package'      => $info['download_url'],
+				'requires'     => $info['requires'] ?? '',
+				'requires_php' => $info['requires_php'] ?? '',
+				'tested'       => $info['tested'] ?? '',
+			);
+		} else {
+			// Report "up to date" so WP doesn't keep re-querying / shows a clean state.
+			$transient->no_update[ $basename ] = (object) array(
+				'slug'        => 'wc-product-sync',
+				'plugin'      => $basename,
+				'new_version' => $current,
+			);
+		}
+		return $transient;
+	}
+
+	/** Provide the "View version details" modal (plugins_api) from the same JSON metadata. */
+	public function update_details( $result, $action, $args ) {
+		if ( 'plugin_information' !== $action || empty( $args->slug ) || 'wc-product-sync' !== $args->slug ) {
+			return $result;
+		}
+		$info = $this->remote_update_info();
+		if ( empty( $info['version'] ) ) {
+			return $result;
+		}
+		$sections = ( isset( $info['sections'] ) && is_array( $info['sections'] ) )
+			? $info['sections']
+			: array( 'changelog' => (string) ( $info['changelog'] ?? '' ) );
+		return (object) array(
+			'name'          => $info['name'] ?? 'WC Product Sync (SKU)',
+			'slug'          => 'wc-product-sync',
+			'version'       => $info['version'],
+			'author'        => $info['author'] ?? 'Michał Pańczyk',
+			'homepage'      => $info['homepage'] ?? '',
+			'requires'      => $info['requires'] ?? '',
+			'requires_php'  => $info['requires_php'] ?? '',
+			'tested'        => $info['tested'] ?? '',
+			'last_updated'  => $info['last_updated'] ?? '',
+			'download_link' => $info['download_url'] ?? '',
+			'sections'      => $sections,
+		);
+	}
+
+	/** Drop the cached metadata right after any plugin update so the next check re-reads the server. */
+	public function flush_update_cache( $upgrader, $data ) {
+		if ( is_array( $data ) && isset( $data['type'] ) && 'plugin' === $data['type'] ) {
+			delete_transient( self::UPDATE_TRANSIENT );
+		}
+	}
+
 	/** Uninstall cleanup. Removes plugin OPTIONS, scheduled cron events, and transients only.
 	 *  Product meta ({@see META_SYNCED}, {@see META_SOURCE_ID}, image maps) and the soft-delete
 	 *  tag are intentionally LEFT INTACT: deleting them would destroy synced product data that
@@ -2787,6 +2909,7 @@ $defaults = array(
 		delete_transient( self::SYNC_LOCK_TRANSIENT );
 		delete_transient( self::SYNC_PROGRESS_TRANSIENT );
 		delete_transient( self::SYNC_KEYS_TRANSIENT );
+		delete_transient( self::UPDATE_TRANSIENT );
 	}
 }
 

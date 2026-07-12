@@ -106,6 +106,19 @@
 
 ---
 
+## ✅ Completed (v0.9.21 — self-hosted updates)
+
+- **Self-hosted JSON updater** (opt-in via `WC_PRODUCT_SYNC_UPDATE_URL`). Filters
+  `pre_set_site_transient_update_plugins` (inject available update / mark up-to-date) + `plugins_api`
+  (version-details modal), fed by a cached JSON endpoint. Result: one-click updates in the WP Plugins
+  screen — no re-upload. Undefined constant → updater fully inert (no HTTP). Metadata cached 12h on
+  success / 2h negative on failure; flushed after any plugin update; transient cleaned on uninstall.
+- `build.sh` now emits `dist/update.json` alongside the zip (fields derived from the plugin header;
+  host via `WPS_UPDATE_BASE_URL`). README documents enabling + hosting + publish flow.
+- Lightweight/self-contained (no bundled update-checker library) to keep the single-file distribution.
+
+---
+
 ## ✅ Completed (v0.9.20 — force-full fix)
 
 - **[CRITICAL]: Force-full sync either no-op'd or wiped the fresh catalog.** The delete was gated on
