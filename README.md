@@ -478,6 +478,36 @@ release używa automatycznego tokenu przebiegu).
 
 **Wymagania runnera:** `php-cli`, `python3`, `curl`, `zip`, `unzip`, `ssh` na hoście runnera.
 
+### Efemeryczny rig e2e (`tests/stack/`)
+
+Dwa pełne sklepy WooCommerce (źródło + cel) w Dockerze, na jednej sieci. **Nie wymaga rigu LAN,
+SSH ani sekretów** — działa tak samo na laptopie i w CI, i niczego nie mutuje poza sobą.
+
+```bash
+tests/stack/up.sh      # build ZIP-a → 2 sklepy → WP+WC → klucze REST → instalacja wtyczki z ZIP-a
+tests/stack/seed.sh    # deterministyczny katalog (stały seed → powtarzalne błędy)
+tests/stack/e2e.sh     # pełny sync + parytet + force-full
+tests/stack/down.sh    # kasuje wszystko razem z wolumenami
+```
+
+Cel instaluje wtyczkę **z paczki zbudowanej przez `build.sh`**, więc testowany jest realny artefakt
+dystrybucyjny, a nie drzewo robocze.
+
+**`e2e.sh` wymusza wielobatchowość** (`per_page=10`, `sync_batch_limit=15`) i **traktuje pojedynczy
+batch jako błąd**. To nie jest kaprys: błąd z 0.9.20 ujawniał się **wyłącznie** przy batchach
+wznowienia — dla katalogu mieszczącego się w jednym batchu force-full kasował właśnie
+zsynchronizowane produkty, a dla dzielonego nie uruchamiał się wcale. Test jednobatchowy nie
+sprawdziłby żadnego z tych przypadków.
+
+Faza 2 usuwa kilka produktów ze źródła, włącza `force_full_sync` i sprawdza, że z celu zniknęły
+**dokładnie te** produkty — reszta katalogu przeżyła.
+
+**Ograniczenia rigu (tylko na źródle, produkcji nie dotyczą):** WooCommerce przyjmuje Basic auth
+kluczem CK/CS **tylko gdy `is_ssl()`**; stack jest po czystym HTTP, więc `wp-config` ustawia
+`$_SERVER['HTTPS'] = 'on'`. To z kolei sprawia, że WP zaczyna podawać adresy obrazków po `https://`,
+których cel nie pobierze — dlatego mu-plugin (`tests/stack/mu/`) wymusza z powrotem `http`. Produkcja
+działa po prawdziwym TLS i nie potrzebuje żadnego z tych obejść.
+
 ### Smoke test (plugin loading)
 
 Weryfikuje, że wtyczka ładuje się bez fatalnych błędów, singleton działa, cron jest zarejestrowany i stałe klasy są dostępne.
