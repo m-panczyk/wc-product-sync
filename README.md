@@ -301,3 +301,118 @@ Pierwsza publiczna wersja — podstawowa synchronizacja simple/variable/grouped 
 ## Support
 
 Wtyczka jest rozwijana wewnętrznie. W przypadku problemów zaloguj się na **sklep docelowy** i sprawdź logi WooCommerce (`wc-product-sync`). Jeśli problem dotyczy API źródła (błędy 401/403/500), sprawdzaj konfigurację REST API na stronie źródłowej.
+
+---
+
+## Testing
+
+### Smoke test (plugin loading)
+
+Weryfikuje, że wtyczka ładuje się bez fatalnych błędów, singleton działa, cron jest zarejestrowany i stałe klasy są dostępne.
+
+```bash
+# Na rigu (QNAP target):
+WP_SMOKE_RUN=1 wp eval 'include "/share/.../wp-content/plugins/wc-product-sync/tests/smoke-test.php";'
+```
+
+Zwraca exit 0 przy sukcesie, 1 przy dowolnej awarii. Przydatny jako first-line check przed deployem nowej wersji na rig.
+
+### Field-parity integrity test (`tests/sync-parity-test.sh`)
+
+Testuje cykl: mutuj produkt na źródle → szybki sync na celu → weryfikacja parytetu wszystkich prostych produktów źródło↔cel.
+
+**Tryby:**
+- **`tick`** (domyślny): mutuje $K losowych prostych produktów na źródle, uruchamia fast-sync na celu, sprawdza czy pole (`price` lub `stock`) się zgadza
+- **`full`**: uruchamia pełny sync, następnie weryfikuje parytet całego katalogu + rollup cen wariacji + tagi soft-delete
+
+**Uruchomienie:**
+```bash
+# Cena (default), tryb tick (default):
+tests/sync-parity-test.sh
+
+# Cena, tryb full:
+tests/sync-parity-test.sh full
+
+# Stock, tryb tick:
+TEST_FIELD=stock tests/sync-parity-test.sh tick
+
+# Stock, pełny, 10 produktów do mutacji:
+TEST_FIELD=stock PARITY_TEST_K=10 tests/sync-parity-test.sh full
+```
+
+**Wymagania:** `tests/perf.env` z endpointami rigu (gitignored — skopiuj z `perf.env.example`). Skrypt potrzebuje SSH do źródła i celu, wp-cli na obu, InfluxDB i Grafana (best-effort emit).
+
+**Dodatkowe pełne sprawdzenia (tryb `full`):**
+- **Variable rollup:** porównuje `min_price`/`max_price` produktów zmiennych z rzeczywistymi cenami wariacji (tolerancja ±0.01)
+- **Soft-delete tagging:** próbuje 100 produktów draft, sprawdza czy te bez `_wps_synced` mają tag `wps-usuniete`
+
+### Performance benchmark (`tests/perf-run.sh`)
+
+Times full sync run i loguje metryki do CSV + Grafana annotation.
+
+```bash
+# Baseline (wipe+recreate):
+tests/perf-run.sh baseline-v0.9.23
+
+# Incremental (update in place):
+tests/perf-run.sh incremental 0   # label=incremental, force_full=0
+
+# Default: wipe+recreate, label="manual"
+tests/perf-run.sh
+```
+
+**Auto-regression check:** porównuje duration z historycznym mediana baseline-ów — warning na stderr jeśli >1.5× median.
+
+### Grafana dashboard push
+
+```bash
+tests/apply-dashboard.sh
+```
+
+Wypycha `tests/grafana-dashboard.json` do live Grafany (uid `wps-perf`). Automatycznie dodaje price-parity panels + wps-price annotation overlay.
+
+### Systemd timers (automated testing)
+
+```bash
+# Zainstaluj timery:
+sudo cp tests/systemd/wps-*.timer tests/systemd/wps-*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wps-price-tick.timer   # hourly price parity @:30
+sudo systemctl enable --now wps-stock-tick.timer    # hourly stock parity @:00
+# Full sync parity test (daily noon):
+sudo systemctl enable --now wps-price-full.timer    # daily 12:00
+
+# Status:
+systemctl list-timers | grep wps
+journalctl -u wps-price-tick --since "1 hour ago" --no-pager
+```
+
+### PHPCS-WP linting (standalone)
+
+Po zainstalowaniu composer deps (`composer install`):
+
+```bash
+# Dry-run check:
+composer phpcs wc-product-sync.php
+
+# Auto-fix (review before committing!):
+composer phpcbf wc-product-sync.php
+
+# Only warn about unprepared SQL queries:
+composer phpcs --standard=WordPress.DB.PreparedSQL.NotPrepared wc-product-sync.php
+```
+
+### Testing on remote rig without scripts
+
+Jeśli nie masz skryptów na rigu, możesz uruchomić inline PHP:
+
+```bash
+# Smoke test inline:
+wp eval '
+if ( class_exists( "WC_Product_Sync" ) && \WC_Product_Sync::instance() !== null ) {
+    echo "OK: plugin loaded, singleton OK\n"; exit(0);
+} else {
+    echo "FAIL: plugin load or singleton failed\n"; exit(1);
+}'
+```
+

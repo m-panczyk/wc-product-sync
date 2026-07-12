@@ -26,6 +26,59 @@
 
 ---
 
+## TESTING IMPROVEMENTS — Multi-Round Improvement Loop (2026-07-12)
+
+### Scope: 6 recommendations from project review
+
+1. ✅ Gitignore perf.env → **already done** (was in .gitignore line 6)
+2. ✅ Add plugin smoke test → Round 2 (commit 08ac419)
+3. ✅ Add PHPCS-WP linting → Round 3 (commit c00f66d)
+4. ✅ Extend sync-parity-test.sh coverage → Round 4 (commit 6e247cb)
+5. ✅ Add performance regression threshold → Round 5 (commit 1f48b9a)
+6. ✅ Document how to run tests manually → Round 6 (commit pending)
+
+### Round 3 — PHPCS-WP linting config (commit c00f66d)
+
+- **Files created**: `composer.json`, `phpcs.xml.dist`
+- **Purpose**: Standardized WordPress coding standards check, single-file plugin context
+- **Usage** (after `composer install`): `composer phpcs wc-product-sync.php`
+- **Auto-fix**: `composer phpcbf --dry-run` to preview changes
+
+### Round 4 — Extended parity tests (commit 6e247cb)
+
+- **New full-mode checks added after existing price/stock parity**:
+  - Variable product parent rollup: verifies `min_price`/`max_price` in `wp_postmeta` match actual variation child price ranges (with ±0.01 tolerance for rounding)
+  - Soft-delete tagging sample: checks that ~100 draft products not matching `_wps_synced` have the `wps-usuniete` tag
+- **Both contribute to VERDICT**: if rollup mismatch > 0, test FAILs
+
+### Round 5 — Performance regression check (commit 1f48b9a)
+
+- **Mechanism**: `check_regression()` function in `perf-run.sh`
+- **Logic**: compares current duration against historical median of baseline runs for the same version; falls back to all-baseline median if no version-specific data
+- **Threshold**: 1.5× median = WARNING (not a hard fail — perf context matters)
+- **Output**: `PERF_OK:` or `PERF_REGRESSION:` on stderr
+
+### Round 6 — Test documentation (commit pending)
+
+- Added comprehensive Testing section to README.md
+- Covers all test scripts, rig setup, usage examples, CI integration tips
+
+### Round 2 — Plugin smoke test (commit 08ac419)
+
+- **Agent**: Claude Code (planning, timed out), Hermes direct implementation
+- **File created**: `tests/smoke-test.php` (157 lines)
+- **Checks performed**:
+  1. WC_Product_Sync class loads without fatal error
+  2. Singleton instance() returns valid object
+  3. get_option('wc_product_sync_options') doesn't fatal even when missing
+  4. wp_next_scheduled('wc_product_sync_daily_event') works
+  5. wp_next_scheduled('wc_product_sync_fast_event') works
+  6. Class constants accessible via reflection (OPTION_KEY value verified)
+  7. Singleton returns same instance on repeated calls
+- **Usage**: `WP_SMOKE_RUN=1 wp eval 'include "/path/to/tests/smoke-test.php";'`
+
+---
+
 ## ROUND 4 — Codex Full Code Review Results
 
 ### Run details:
