@@ -44,12 +44,7 @@ jobs:
           FORGEJO_REPO: ${{ github.repository }}
         run: ./publish.sh "${{ inputs.tag || github.ref_name }}"
 
-      - name: Upload build artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: |
-            dist/*.zip
-            dist/update.json
-          if-no-files-found: warn
+      # No upload-artifact step: actions/upload-artifact@v4 needs GitHub's artifact API v2,
+      # which Forgejo does not implement (GHESNotSupportedError), and it turned a successful
+      # v0.9.23 release red. It was redundant anyway — publish.sh attaches the ZIP and
+      # update.json to the release itself, which is the durable copy.
