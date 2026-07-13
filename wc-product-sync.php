@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.22
+ * Version:           0.9.23
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -86,6 +86,8 @@ final class WC_Product_Sync {
 	private $last_match_method = '';
 	/** Powód pominięcia ostatniego produktu (dla raportu) */
 	private $last_skip_reason = '';
+	/** Czy przy ostatnim produkcie nie udało się pobrać obrazu (→ liczone jako błąd) */
+	private $last_image_failed = false;
 	/** Czy trwa AKTUALIZACJA (true) czy TWORZENIE (false) — pola bramkujemy tylko przy aktualizacji */
 	private $writing_update = false;
 	/** Szybka synchronizacja: tylko wybrane pola (fast_sync_fields), tylko aktualizacja istniejących
@@ -1758,12 +1760,22 @@ $defaults = array(
 			return;
 		}
 
-		$this->last_match_method = '';
-		$this->last_skip_reason  = '';
+		$this->last_match_method  = '';
+		$this->last_skip_reason   = '';
+		$this->last_image_failed  = false;
 		try {
 			$result = $this->dispatch_upsert( $p, $dry_run );
 			if ( isset( $stats[ $result ] ) ) {
 				$stats[ $result ]++;
+			}
+			// An image we could not fetch is missing product data — count it, so the summary
+			// (and the admin notice, and the parity of what an operator believes) reflects it.
+			// The product itself is still created/updated and still mark_synced()'d: it must NOT
+			// look un-refreshed to force-full, or a transient image failure would get the whole
+			// product deleted on the next run.
+			if ( $this->last_image_failed ) {
+				$stats['errors']++;
+				$this->report_add( 'errors', $base + array( 'reason' => 'nie pobrano obrazów (produkt zachowany, obrazy bez zmian)' ) );
 			}
 			if ( 'created' === $result ) {
 				$this->report_add( 'created', $base + array( 'how' => 'nowy produkt' ) );
@@ -2519,6 +2531,7 @@ $defaults = array(
 		}
 		$new     = array();
 		$att_ids = array();
+		$failed  = 0;
 		foreach ( $images as $img ) {
 			$src = isset( $img['src'] ) ? esc_url_raw( $img['src'] ) : '';
 			if ( '' === $src ) {
@@ -2529,12 +2542,43 @@ $defaults = array(
 				$att = (int) $old[ $key ]; // already have it — no download
 			} else {
 				$att = $this->sideload_single( $src, $pid );
+				if ( ! $att ) {
+					$failed++;
+				}
 			}
 			if ( $att ) {
 				$new[ $key ] = $att;
 				$att_ids[]   = $att;
 			}
 		}
+
+		// A DOWNLOAD FAILURE MUST NEVER DESTROY WHAT WE ALREADY HAVE.
+		//
+		// The source still lists these images; we just could not fetch one right now (a blip, a
+		// TLS mismatch, a 502). Previously the code carried on regardless: the failed key never
+		// entered $new, so the cleanup below deleted the product's existing attachments, and an
+		// empty $att_ids stripped the images off the product entirely — permanent local data loss
+		// caused by a transient network error, reported as a clean run (błędy=0).
+		//
+		// So on any failure: leave the product's images and the image map exactly as they were,
+		// bin only the attachments we created during THIS call (otherwise they orphan), and tell
+		// the caller. The next run retries from the unchanged map.
+		if ( $failed ) {
+			foreach ( $new as $k => $att ) {
+				if ( ! isset( $old[ $k ] ) ) {
+					wp_delete_attachment( (int) $att, true );
+				}
+			}
+			$this->last_image_failed = true;
+			$this->log( 'error', sprintf(
+				'Obrazy NIE zsynchronizowane dla ID=%d: %d z %d nie pobrano. Zachowano dotychczasowe obrazy — nic nie usunięto.',
+				$pid,
+				$failed,
+				count( $images )
+			) );
+			return false;
+		}
+
 		// Delete attachments we created for images the source no longer references.
 		foreach ( $old as $k => $att ) {
 			if ( ! isset( $new[ $k ] ) && ! in_array( (int) $att, $att_ids, true ) ) {
@@ -2550,6 +2594,7 @@ $defaults = array(
 		}
 		update_post_meta( $pid, self::META_IMAGE_MAP, wp_json_encode( $new ) );
 		$product->save();
+		return true;
 	}
 
 	private function sideload_single( $src, $post_id ) {
@@ -2559,7 +2604,10 @@ $defaults = array(
 
 		$att = media_sideload_image( esc_url_raw( $src ), $post_id, null, 'id' );
 		if ( is_wp_error( $att ) ) {
-			$this->log( 'warning', 'Obraz pominięty (' . $src . '): ' . $att->get_error_message() );
+			// 'error', not 'warning': this is missing product data, and a warning is something an
+			// operator reads past. sync_product_images() turns it into a counted error so the run
+			// summary says so too.
+			$this->log( 'error', 'Nie pobrano obrazu (' . $src . '): ' . $att->get_error_message() );
 			return 0;
 		}
 		return (int) $att;

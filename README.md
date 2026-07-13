@@ -391,7 +391,25 @@ wp transient delete wps_update_info
 
 ## Zmiany (Changelog)
 
-### 0.9.22 (current) — token dla prywatnego serwera aktualizacji
+### 0.9.23 (current) — [krytyczne] nieudane pobranie obrazu kasowało obrazy lokalne
+
+- **[krytyczne] Utrata danych przy chwilowym błędzie sieci.** Gdy źródło podmieniło obraz produktu,
+  a cel nie zdołał pobrać nowego (blip sieci, niezgodność TLS, 502), `sync_product_images()` szło
+  dalej: nowy klucz nie trafiał do mapy `_wps_image_map`, więc pass sprzątający **usuwał dotychczasowe
+  załączniki**, a pusta lista **czyściła obrazy z produktu**. Trwała utrata lokalnych danych z powodu
+  **przejściowego** błędu — zgłoszona jako czysty przebieg (`błędy=0`).
+- **Naprawa:** przy jakimkolwiek nieudanym pobraniu obrazy produktu i mapa **zostają nietknięte**
+  (kasowane są tylko załączniki utworzone w tym przebiegu, żeby nie osierocić). Następny przebieg
+  ponawia próbę z niezmienionej mapy.
+- **Księgowanie błędów:** nieudane pobranie obrazu loguje się teraz jako `error` (było: `warning`)
+  **i zwiększa licznik `błędy`** w podsumowaniu przebiegu oraz w raporcie. Produkt nadal dostaje
+  `_wps_synced` — inaczej force-full skasowałby go przy następnym przebiegu za to, że „nie został
+  odświeżony".
+- Regresja przykryta testem e2e (faza 3): podmiana obrazu na źródle + zerwane pobieranie → obrazy na
+  celu **przeżywają**, a przebieg **raportuje błąd**. Test zweryfikowany na starym kodzie: 3 → 2 obrazy
+  i `błędy=0`.
+
+### 0.9.22 — token dla prywatnego serwera aktualizacji
 - **Obsługa tokenu w updaterze:** stała `WC_PRODUCT_SYNC_UPDATE_TOKEN` pozwala pobierać `update.json` i ZIP z prywatnego repozytorium (Forgejo/Gitea). Nagłówek `Authorization: token …` dołączany jest tylko do żądań na host z `UPDATE_URL` (również do pobrania ZIP-a realizowanego przez rdzeń WP przez filtr `http_request_args`), więc token nie wycieka do innych serwerów.
 
 ### 0.9.21 — aktualizacje z własnego serwera

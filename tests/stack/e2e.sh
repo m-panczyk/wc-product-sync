@@ -127,25 +127,29 @@ assert_status_filter() {
 	'
 }
 
-# The sync must not merely finish — it must finish without errors. Image sideloading once
-# failed for every image while the run still reported błędy=0 and looked green.
+# The sync must not merely finish — it must finish without errors.
+#
+# WARNING is in the pattern deliberately. Image sideload failures used to log at 'warning'
+# and leave błędy=0, so a run that silently stripped images off products looked perfectly
+# green here. Anything the plugin considers worth warning about is worth failing a test over;
+# if a benign warning ever shows up, whitelist that specific one rather than widening this.
 assert_no_errors() {
-	echo "==> Asserting the sync logged no errors"
+	echo "==> Asserting the sync logged no errors or warnings"
 	twp eval '
 	$files = glob( WP_CONTENT_DIR . "/uploads/wc-logs/wc-product-sync*.log" );
 	if ( ! $files ) { echo "  FAIL: no plugin log found — did the sync run?\n"; exit( 1 ); }
 	$bad = array();
 	foreach ( $files as $f ) {
 		foreach ( file( $f ) as $line ) {
-			if ( preg_match( "/\bERROR\b|błędy=([1-9])/u", $line ) ) { $bad[] = trim( $line ); }
+			if ( preg_match( "/\b(ERROR|WARNING)\b|błędy=[1-9]/u", $line ) ) { $bad[] = trim( $line ); }
 		}
 	}
 	if ( $bad ) {
-		echo "  FAIL: " . count( $bad ) . " error line(s) in the sync log\n";
+		echo "  FAIL: " . count( $bad ) . " error/warning line(s) in the sync log\n";
 		foreach ( array_slice( $bad, 0, 10 ) as $l ) { echo "    $l\n"; }
 		exit( 1 );
 	}
-	echo "  PASS: no ERROR lines, błędy=0\n";
+	echo "  PASS: no ERROR/WARNING lines, błędy=0\n";
 	'
 }
 
@@ -273,5 +277,67 @@ fi
 compare "after force-full, $BATCHES2 batches"
 opt force_full_sync 0
 
+# --- Phase 3: a failed image download must not destroy the images we already have ----------
+#
+# The scenario, exactly as it would happen in production: the source swaps a product's image,
+# and the target cannot fetch the new one (blip, TLS mismatch, 502). Before the fix, the new
+# key never entered the image map, so the cleanup pass deleted the product's existing
+# attachments and an empty list stripped the images off the product — permanent local data
+# loss from a transient network error, reported as błędy=0.
+#
+# We break fetching for real rather than mocking it: removing the source's mu-plugin makes WP
+# advertise https:// image URLs again, and there is no TLS listener in the stack.
+echo "==> Phase 3: image download failure must not delete existing images"
+
+BEFORE="$(twp eval '
+$p = wc_get_product( wc_get_product_id_by_sku( "E2E-S-001" ) );
+echo ( $p->get_image_id() ? 1 : 0 ) + count( $p->get_gallery_image_ids() );
+')"
+echo "    target has $BEFORE image(s) for E2E-S-001"
+[ "$BEFORE" -ge 1 ] || { echo "!! FAIL: fixture broken — E2E-S-001 has no images to lose" >&2; exit 1; }
+
+# Source swaps in a NEW image (new attachment id => new map key => the target must download).
+swp eval '
+$p  = wc_get_product( wc_get_product_id_by_sku( "E2E-S-001" ) );
+$up = wp_upload_dir();
+$f  = trailingslashit( $up["path"] ) . "e2e-swapped.png";
+file_put_contents( $f, base64_decode( "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" ) );
+$att = wp_insert_attachment( array( "post_mime_type" => "image/png", "post_title" => "e2e-swapped", "post_status" => "inherit" ), $f );
+$p->set_image_id( $att );
+$p->save();
+' >/dev/null
+
+# Break image fetching: without the mu-plugin the source serves https:// URLs, which nothing
+# in this stack can answer.
+docker compose exec -T -u 0 src-wp rm -f /var/www/html/wp-content/mu-plugins/00-e2e-http-urls.php
+
+twp eval 'foreach ( glob( WP_CONTENT_DIR . "/uploads/wc-logs/wc-product-sync*.log" ) as $f ) { unlink( $f ); }' >/dev/null
+drive >/dev/null
+
+AFTER="$(twp eval '
+$p = wc_get_product( wc_get_product_id_by_sku( "E2E-S-001" ) );
+echo ( $p->get_image_id() ? 1 : 0 ) + count( $p->get_gallery_image_ids() );
+')"
+echo "    target has $AFTER image(s) after the failed fetch"
+
+FAIL=0
+if [ "$AFTER" -lt "$BEFORE" ]; then
+	echo "  FAIL: images were DESTROYED by a failed download ($BEFORE -> $AFTER)" >&2
+	FAIL=1
+fi
+# And it must be reported, not swallowed: a run that loses nothing but says nothing is still
+# a run where the operator never learns the source has an image they cannot fetch.
+if ! twp eval 'foreach ( glob( WP_CONTENT_DIR . "/uploads/wc-logs/wc-product-sync*.log" ) as $f ) { echo file_get_contents( $f ); }' \
+	| grep -qE 'błędy=[1-9]'; then
+	echo "  FAIL: the failed image download was not counted as an error (błędy=0)" >&2
+	FAIL=1
+fi
+
+# Put the source back the way we found it.
+docker compose cp mu/00-e2e-http-urls.php src-wp:/var/www/html/wp-content/mu-plugins/00-e2e-http-urls.php
+
+[ "$FAIL" -eq 0 ] || exit 1
+echo "  PASS: existing images preserved, failure counted as an error"
+
 echo
-echo "e2e PASS (multi-batch full sync + force-full deletion)"
+echo "e2e PASS (multi-batch sync + force-full + image-failure safety)"
