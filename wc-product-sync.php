@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.24
+ * Version:           0.9.25
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -52,6 +52,10 @@ final class WC_Product_Sync {
 	const SYNC_LAST_REPORT     = 'wps_last_sync_report'; // Per-item report of the last run (what/how/why)
 	const REPORT_BUCKET_CAP    = 500;                    // Max items stored per bucket (counts stay exact)
 	const UPDATE_TRANSIENT     = 'wps_update_info';       // cached self-hosted update metadata (JSON)
+	/** Public release channel, used when WC_PRODUCT_SYNC_UPDATE_URL is not defined. A moving
+	 *  metadata pointer — the ZIP it names is an immutable versioned release. Define the constant
+	 *  to point elsewhere, or to '' to switch the updater off entirely. */
+	const DEFAULT_UPDATE_URL   = 'https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/latest/update.json';
 
 	// Soft-delete
 	const META_SYNCED       = '_wps_synced';
@@ -2911,10 +2915,19 @@ $defaults = array(
 	 *  Aktualizacje z własnego serwera (self-hosted JSON updater)
 	 * ================================================================== */
 
-	/** Update-metadata endpoint. Empty (constant undefined) → updater fully disabled: no HTTP calls,
-	 *  no filters do anything. Overridable via the `wps_update_url` filter. */
+	/** Update-metadata endpoint.
+	 *
+	 *  Defaults to the project's public release channel, so a plain install gets updates in
+	 *  Wtyczki → Aktualizuj with no configuration at all. The channel serves metadata only; the
+	 *  ZIP it points at is the immutable versioned release.
+	 *
+	 *  Overridable, in both directions:
+	 *    define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://…/update.json' );  // your own server
+	 *    define( 'WC_PRODUCT_SYNC_UPDATE_URL', '' );                        // updater OFF, no HTTP
+	 *  or via the `wps_update_url` filter. An empty value disables the updater completely: no
+	 *  requests are made and every update filter becomes a no-op. */
 	private function update_url() {
-		$url = defined( 'WC_PRODUCT_SYNC_UPDATE_URL' ) ? WC_PRODUCT_SYNC_UPDATE_URL : '';
+		$url = defined( 'WC_PRODUCT_SYNC_UPDATE_URL' ) ? WC_PRODUCT_SYNC_UPDATE_URL : self::DEFAULT_UPDATE_URL;
 		return trim( (string) apply_filters( 'wps_update_url', $url ) );
 	}
 

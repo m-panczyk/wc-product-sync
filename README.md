@@ -243,15 +243,28 @@ Sprawdź w WooCommerce → Ustawienia → Zaawansowane → REST API czy Consumer
 
 ## Aktualizacje z własnego serwera
 
-Opcjonalny mechanizm: nowe wersje pojawiają się w **Wtyczki → Aktualizuj** (jak wtyczki z wordpress.org), aktualizacja jednym kliknięciem — bez ponownego wgrywania ZIP-a.
+Nowe wersje pojawiają się w **Wtyczki → Aktualizuj** (jak wtyczki z wordpress.org), aktualizacja
+jednym kliknięciem — bez ponownego wgrywania ZIP-a.
 
-**Włączenie** — dodaj do `wp-config.php` na sklepie docelowym:
+**Działa domyślnie, bez żadnej konfiguracji.** Od 0.9.25 wtyczka ma wbudowany adres publicznego
+kanału wydań (`DEFAULT_UPDATE_URL`), a repozytorium jest publiczne — więc **nie trzeba ani stałej, ani
+tokenu**. Świeża instalacja po prostu dostaje aktualizacje.
+
+**Uwaga dla instalacji ≤ 0.9.24:** starsze wersje nie znają domyślnego adresu, więc same się nie
+zaktualizują. Trzeba **raz** wgrać 0.9.25 ręcznie (albo dodać stałą poniżej) — od tego momentu updater
+działa sam.
+
+**Własny serwer aktualizacji** — nadpisz stałą:
 
 ```php
 define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://twoj-serwer.pl/wc-product-sync/update.json' );
 ```
 
-Bez tej stałej updater jest **całkowicie wyłączony** (żadnych zapytań HTTP).
+**Wyłączenie updatera** (żadnych zapytań HTTP) — pusta wartość:
+
+```php
+define( 'WC_PRODUCT_SYNC_UPDATE_URL', '' );
+```
 
 **Prywatne repozytorium (Forgejo/Gitea)** — jeśli `update.json` i ZIP są za autoryzacją, dodaj token dostępu (uprawnienie do odczytu repozytorium):
 
@@ -391,7 +404,23 @@ wp transient delete wps_update_info
 
 ## Zmiany (Changelog)
 
-### 0.9.24 (current) — [krytyczne] błąd pobierania raportowany jako sukces
+### 0.9.25 (current) — updater działa domyślnie, bez konfiguracji
+
+- **Wbudowany publiczny kanał aktualizacji** (`DEFAULT_UPDATE_URL`). Repozytorium jest publiczne, więc
+  świeża instalacja dostaje aktualizacje w **Wtyczki → Aktualizuj** bez stałej w `wp-config.php` i bez
+  tokenu. Wcześniej updater był wyłączony, dopóki nie zdefiniowało się `WC_PRODUCT_SYNC_UPDATE_URL` —
+  co w praktyce znaczyło, że nikt go nie miał włączonego i „nie było opcji aktualizacji".
+- **Nadpisywalne w obie strony:** `define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://…' )` kieruje na
+  własny serwer, a pusta wartość (`''`) **wyłącza updater całkowicie** (zero zapytań HTTP). Token
+  (`WC_PRODUCT_SYNC_UPDATE_TOKEN`) nadal działa dla prywatnych repozytoriów — publiczne go nie
+  potrzebują.
+- **Uwaga dla instalacji ≤ 0.9.24:** nie znają wbudowanego adresu, więc **nie zaktualizują się same**.
+  Trzeba raz wgrać 0.9.25 ręcznie (albo dodać stałą) — potem updater działa automatycznie.
+- Zweryfikowane end-to-end na efemerycznym sklepie: instalacja 0.9.23 → panel oferuje 0.9.24 → `wp
+  plugin update` (ta sama ścieżka co przycisk w adminie) pobiera z publicznego adresu, instaluje,
+  wtyczka zostaje aktywna i się ładuje.
+
+### 0.9.24 — [krytyczne] błąd pobierania raportowany jako sukces
 
 - **[krytyczne] 401 ze źródła wyglądał jak udana synchronizacja.** Błąd pobierania (złe klucze API,
   klucz użytkownika bez dostępu do produktów, źródło pod `http://` — WooCommerce przyjmuje Basic auth
