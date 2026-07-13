@@ -20,8 +20,10 @@ jobs:
       - name: Toolchain
         run: |
           apt-get update -qq
+          # iproute2: node:22-bookworm ships no `ip`, and the next step needs it to find
+          # the DinD daemon on the default gateway.
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            ca-certificates curl gnupg zip unzip python3 >/dev/null
+            ca-certificates curl gnupg zip unzip python3 iproute2 >/dev/null
           # Docker's own repo — Debian ships no compose v2 plugin.
           install -m 0755 -d /etc/apt/keyrings
           curl -fsSL https://download.docker.com/linux/debian/gpg \
