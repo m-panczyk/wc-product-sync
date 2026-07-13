@@ -109,14 +109,18 @@ print(next((str(a["id"]) for a in r.get("assets") or [] if a["name"]==sys.argv[1
 # by tag NAME) — verified when v0.9.23 was re-tagged. Channel tags are `latest`/`latest-beta`,
 # which never match the release workflow's `v*` trigger, so this cannot recurse.
 move_tag() { # move_tag TAG
-	local tag="$1" push_url
+	local tag="$1" push_url err
 	push_url="$(printf '%s' "$FORGEJO_URL" | sed -E "s#^(https?://)#\1oauth2:$FORGEJO_TOKEN@#")/$FORGEJO_REPO.git"
 	git -C "$ROOT" tag -f "$tag" "$COMMIT" >/dev/null
-	if git -C "$ROOT" push -f "$push_url" "refs/tags/$tag" >/dev/null 2>&1; then
+	# Capture git's actual complaint. The first version threw stderr away and printed a generic
+	# warning, so when `latest` silently failed to move on v0.9.23 there was nothing to read —
+	# a swallowed error is worse than no error, because it looks like it worked.
+	if err="$(git -C "$ROOT" push -f "$push_url" "refs/tags/$tag" 2>&1)"; then
 		echo "  moved tag '$tag' -> ${COMMIT:0:7}"
 	else
 		# Non-fatal: the asset swap above is what the updater actually consumes.
-		echo "  WARNING: could not move tag '$tag' (assets are published regardless)" >&2
+		echo "  WARNING: could not move tag '$tag' — the assets are published regardless." >&2
+		printf '%s\n' "$err" | sed -e "s#oauth2:[^@]*@#oauth2:[REDACTED]@#g" -e 's/^/    git: /' >&2
 	fi
 }
 

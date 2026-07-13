@@ -32,6 +32,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # publish.sh pushes the channel tags (latest / latest-beta). Git refuses to push
+          # refs out of a shallow clone, which is why the `latest` tag silently failed to
+          # move on the v0.9.23 release while the asset swap succeeded.
+          fetch-depth: 0
 
       - name: PHP syntax
         run: php -l wc-product-sync.php
