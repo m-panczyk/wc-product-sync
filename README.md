@@ -402,6 +402,70 @@ wp transient delete wps_update_info
 
 ---
 
+## Deinstalacja
+
+**Najważniejsze: usunięcie wtyczki NIE usuwa produktów.** Zsynchronizowany katalog zostaje w sklepie
+— wtyczka kasuje po sobie tylko własne ustawienia i harmonogram.
+
+### 1. Dezaktywacja (odwracalna, nic nie ginie)
+
+**Wtyczki → Zainstalowane → Wyłącz**, albo:
+
+```bash
+wp plugin deactivate wc-product-sync
+```
+
+Zatrzymuje harmonogram (`wc_product_sync_daily_event`, `wc_product_sync_fast_event`). Ustawienia,
+klucze API, produkty i wszystkie metadane **zostają**. Ponowne włączenie wraca do stanu sprzed.
+
+### 2. Usunięcie (uninstall)
+
+**Wtyczki → Usuń**, albo:
+
+```bash
+wp plugin uninstall wc-product-sync --deactivate
+```
+
+| Znika | Zostaje |
+|---|---|
+| Ustawienia (`wc_product_sync_options`) — w tym URL źródła i klucze API | **Wszystkie produkty i wariacje** |
+| Wynik i raport ostatniego przebiegu (`wps_last_sync_result`, `wps_last_sync_report`) | **Obrazy produktów** (załączniki) |
+| Zdarzenia cron: `wc_product_sync_daily_event`, `wps_sync_resume`, `wc_product_sync_fast_event` | Meta: `_wps_synced`, `_wps_source_id`, `_wps_image_map`, `_wps_soft_deleted_at` |
+| Transienty: blokada, postęp, klucze źródła, cache updatera | Tag `Usunięte (sync)` (`wps-usuniete`) i szkice po soft-delete |
+
+**Dlaczego metadane zostają — to jest celowe.** Gdyby uninstall je skasował, zniknęłoby wszystko, co
+wiąże lokalne produkty ze źródłem. Po ponownej instalacji wtyczka nie dopasowałaby ich po
+`_wps_source_id` (dotyczy zwłaszcza produktów bez SKU i grouped) i **zduplikowałaby katalog** zamiast
+go zaktualizować. Usunięcie wtyczki nie może niszczyć danych, na których sklep dalej stoi.
+
+Zachowanie jest pokryte testem (`tests/stack/uninstall.sh`): sprawdza, że wszystkie opcje, crony
+i transienty **znikają**, a produkty, załączniki, meta, tag i szkice **przeżywają**.
+
+### 3. Pełne wyczyszczenie śladów (opcjonalne, nieodwracalne)
+
+Tylko jeśli **na pewno** nie wrócisz do tej wtyczki. Uruchom **po** uninstallu:
+
+```bash
+wp eval '
+global $wpdb;
+$n = $wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_key IN (\"_wps_synced\",\"_wps_source_id\",\"_wps_image_map\",\"_wps_soft_deleted_at\")" );
+echo "usunięto $n wierszy meta\n";
+$t = term_exists( "wps-usuniete", "product_tag" );
+if ( $t ) { wp_delete_term( (int) $t["term_id"], "product_tag" ); echo "usunięto tag wps-usuniete\n"; }
+'
+rm -f wp-content/uploads/wc-logs/wc-product-sync-*.log
+```
+
+**Czego to nie robi:** nie usuwa produktów ani obrazów — te zostają w sklepie jak każdy inny towar.
+Jeśli chcesz się ich pozbyć, kasuj je normalnie w WooCommerce.
+
+**Konsekwencja, jeśli jednak wrócisz do wtyczki:** produkty z SKU i tak zostaną dopasowane (SKU jest
+pierwszym kryterium), ale produkty **bez SKU** i grouped bez SKU zduplikują się, bo przepadło
+`_wps_source_id`. Do tego pierwszy sync po wyczyszczeniu **pobierze wszystkie obrazy od nowa** —
+mapa `_wps_image_map` już nie istnieje.
+
+---
+
 ## Zmiany (Changelog)
 
 ### 0.9.25 (current) — updater działa domyślnie, bez konfiguracji
