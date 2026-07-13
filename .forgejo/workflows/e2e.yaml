@@ -1,0 +1,60 @@
+name: E2E
+
+# Hermetic end-to-end sync test: spins up two throwaway WooCommerce stores as sibling
+# containers on the same DinD daemon that runs this job, syncs one into the other, and
+# asserts parity. No rig, no SSH key, no secrets — safe on every push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: self-hosted
+    steps:
+      - name: Toolchain
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            ca-certificates curl gnupg zip unzip python3 >/dev/null
+          # Docker's own repo — Debian ships no compose v2 plugin.
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/debian/gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] \
+            https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            docker-ce-cli docker-compose-plugin >/dev/null
+          docker --version && docker compose version
+
+      - uses: actions/checkout@v4
+
+      # This job runs INSIDE DinD, so the daemon is reachable at the job's default
+      # gateway. The stack comes up as siblings of this container, on that same daemon.
+      - name: Point the Docker CLI at the DinD daemon
+        run: |
+          GW="$(ip route | awk '/default/{print $3}')"
+          echo "DOCKER_HOST=tcp://$GW:2375" >> "$GITHUB_ENV"
+          echo "daemon at tcp://$GW:2375"
+
+      - name: Daemon reachable
+        run: docker info --format 'server {{.ServerVersion}} / driver {{.Driver}}'
+
+      - name: Bring up the stack
+        run: tests/stack/up.sh
+
+      - name: Seed the source catalog
+        run: tests/stack/seed.sh
+
+      - name: Sync + parity + force-full
+        run: tests/stack/e2e.sh
+
+      - name: Tear down
+        if: always()
+        run: tests/stack/down.sh || true

@@ -52,11 +52,7 @@ services:
       WORDPRESS_DB_NAME: wordpress
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: wordpress
-    volumes:
-      - src-wp-data:/var/www/html
-      # Undoes the https:// URLs that the wp-config is_ssl() shim would otherwise
-      # produce — see mu/00-e2e-http-urls.php.
-      - ./mu:/var/www/html/wp-content/mu-plugins:ro
+    volumes: [src-wp-data:/var/www/html]
     ports: ['8081:80']
 
   src-cli:
@@ -97,11 +93,11 @@ services:
       WORDPRESS_DB_NAME: wordpress
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: wordpress
-    volumes:
-      - tgt-wp-data:/var/www/html
-      # The built ZIP, so the target installs the REAL distributable artifact
-      # rather than a bind-mounted working tree.
-      - ../../dist:/dist:ro
+    # NOTE: no bind mounts anywhere in this file, on purpose. Under DinD the daemon
+    # resolves bind paths on ITS filesystem, not the CI job's — compose would silently
+    # mount empty dirs instead of failing. up.sh `docker cp`s the plugin ZIP and the
+    # mu-plugin in after startup, which behaves identically locally and in CI.
+    volumes: [tgt-wp-data:/var/www/html]
 
 volumes:
   src-db-data:

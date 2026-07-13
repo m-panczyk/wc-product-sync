@@ -22,6 +22,13 @@ echo "    wc-product-sync-$VERSION.zip"
 echo "==> Starting containers"
 dc up -d --wait
 
+# Bind mounts are unusable under DinD (the daemon would resolve the path on its own
+# filesystem, not this one, and silently mount an empty dir), so copy the artifacts in.
+echo "==> Copying artifacts into the containers"
+dc exec -T -u 0 src-wp mkdir -p /var/www/html/wp-content/mu-plugins
+dc cp mu/00-e2e-http-urls.php src-wp:/var/www/html/wp-content/mu-plugins/00-e2e-http-urls.php
+dc cp "../../dist/wc-product-sync-$VERSION.zip" "tgt-cli:/tmp/wc-product-sync-$VERSION.zip"
+
 install_wp() { # install_wp <wp fn> <url> <title>
 	local fn="$1" url="$2" title="$3"
 	if "$fn" core is-installed 2>/dev/null; then
@@ -79,7 +86,7 @@ sed -i "/That'"'"'s all, stop editing/i \
 
 # --- Plugin on the target -----------------------------------------------------------------
 echo "==> Installing the plugin on the target from the built ZIP"
-twp plugin install "/dist/wc-product-sync-$VERSION.zip" --force --activate >/dev/null
+twp plugin install "/tmp/wc-product-sync-$VERSION.zip" --force --activate >/dev/null
 twp option patch update wc_product_sync_options source_url "$SRC_URL" >/dev/null 2>&1 || \
 	twp option update wc_product_sync_options \
 		"{\"source_url\":\"$SRC_URL\",\"consumer_key\":\"$CK\",\"consumer_secret\":\"$CS\"}" --format=json >/dev/null
