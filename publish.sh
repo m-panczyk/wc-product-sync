@@ -29,6 +29,17 @@ COMMIT="${COMMIT:-$(git rev-parse HEAD)}"
 API="$FORGEJO_URL/api/v1/repos/$FORGEJO_REPO"
 SLUG="wc-product-sync"
 
+# Everything this script prints is also captured and attached to the release as
+# publish-log.txt.
+#
+# Why: Forgejo's job logs are unreadable from outside the web UI on this instance — the API's
+# /actions/jobs/{id}/logs returns 404, and the on-disk actions_log files for recent tasks do
+# not exist. So when `latest` silently failed to move, the error was printed into a void. A
+# release pipeline whose failures cannot be read is one you end up debugging by guessing, and
+# guessing already produced one wrong diagnosis here. The log is small; attach it.
+PUBLISH_LOG="$(mktemp)"
+exec > >(tee -a "$PUBLISH_LOG") 2>&1
+
 # The tag is the source of truth for what we claim to ship; the plugin header is the
 # source of truth for what the updater will compare against. They must agree, or stores
 # either never see the update or re-download forever.
@@ -109,19 +120,29 @@ print(next((str(a["id"]) for a in r.get("assets") or [] if a["name"]==sys.argv[1
 # by tag NAME) — verified when v0.9.23 was re-tagged. Channel tags are `latest`/`latest-beta`,
 # which never match the release workflow's `v*` trigger, so this cannot recurse.
 move_tag() { # move_tag TAG
-	local tag="$1" push_url err
+	local tag="$1" push_url out remote attempt
 	push_url="$(printf '%s' "$FORGEJO_URL" | sed -E "s#^(https?://)#\1oauth2:$FORGEJO_TOKEN@#")/$FORGEJO_REPO.git"
 	git -C "$ROOT" tag -f "$tag" "$COMMIT" >/dev/null
-	# Capture git's actual complaint. The first version threw stderr away and printed a generic
-	# warning, so when `latest` silently failed to move on v0.9.23 there was nothing to read —
-	# a swallowed error is worse than no error, because it looks like it worked.
-	if err="$(git -C "$ROOT" push -f "$push_url" "refs/tags/$tag" 2>&1)"; then
-		echo "  moved tag '$tag' -> ${COMMIT:0:7}"
-	else
-		# Non-fatal: the asset swap above is what the updater actually consumes.
-		echo "  WARNING: could not move tag '$tag' — the assets are published regardless." >&2
-		printf '%s\n' "$err" | sed -e "s#oauth2:[^@]*@#oauth2:[REDACTED]@#g" -e 's/^/    git: /' >&2
-	fi
+
+	# Three attempts, and CONFIRM against the server each time rather than trusting git's exit
+	# code. `latest` failed to move on three consecutive releases while the run stayed green —
+	# reporting success without checking is how that survived. The retry is there because the
+	# leading hypothesis is a lock/race with the asset DELETE+POST we just did on this very
+	# release; if the first attempt keeps failing and the second succeeds, that is the answer.
+	for attempt in 1 2 3; do
+		out="$(git -C "$ROOT" push -f "$push_url" "refs/tags/$tag" 2>&1)" || true
+		remote="$(git -C "$ROOT" ls-remote "$push_url" "refs/tags/$tag" 2>/dev/null | cut -f1)"
+		if [ "$remote" = "$COMMIT" ]; then
+			echo "  moved tag '$tag' -> ${COMMIT:0:7} (attempt $attempt)"
+			return 0
+		fi
+		echo "  attempt $attempt: tag '$tag' is still ${remote:0:7} on the server, expected ${COMMIT:0:7}" >&2
+		printf '%s\n' "$out" | sed -e "s#oauth2:[^@]*@#oauth2:[REDACTED]@#g" -e 's/^/    git: /' >&2
+		sleep 2
+	done
+
+	# Non-fatal: the asset swap is what the updater actually consumes. But say so loudly.
+	echo "  WARNING: could NOT move tag '$tag' after 3 attempts — assets are published regardless." >&2
 }
 
 DL_BASE="$FORGEJO_URL/$FORGEJO_REPO/releases/download/$TAG"
@@ -155,3 +176,10 @@ echo "  ZIP:     $DL_BASE/$SLUG-$VERSION.zip"
 for CHANNEL in $CHANNELS; do
 	echo "  Updater: $FORGEJO_URL/$FORGEJO_REPO/releases/download/$CHANNEL/update.json"
 done
+
+# Attach this run's own output to the release, so a failed tag move (or anything else) leaves
+# a readable trace even though the CI job log cannot be fetched from this Forgejo.
+sleep 1                                    # let the tee above flush
+sed -e "s#oauth2:[^@]*@#oauth2:[REDACTED]@#g" "$PUBLISH_LOG" > "$PUBLISH_LOG.clean"
+upload_asset "$VER_ID" "$PUBLISH_LOG.clean" publish-log.txt >/dev/null 2>&1 || true
+echo "  Log:     $DL_BASE/publish-log.txt"
