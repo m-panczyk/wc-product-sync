@@ -58,13 +58,24 @@ jobs:
       - name: Seed the source catalog
         run: tests/stack/seed.sh
 
-      - name: Sync + parity + force-full
+      - name: Sync + parity + force-full + image/empty-source safety
         run: tests/stack/e2e.sh
+
+      # e2e.sh phase 4 EMPTIES THE SOURCE (that is the point — an empty source must not wipe
+      # the target). perf.sh only resets the target, so without re-seeding it would time syncs
+      # of an empty catalog and every ratio would be a meaningless 1.0.
+      - name: Re-seed the source
+        run: tests/stack/seed.sh
 
       # Paired A/B against the last release tag, on the same stack. Absolute timings here
       # are meaningless (shared NAS, DinD, vfs); the ratio is not.
       - name: Performance (baseline vs candidate)
         run: tests/stack/perf.sh
+
+      # Last: it removes the plugin. Asserts the uninstall cleans up its own options/crons/
+      # transients WITHOUT taking the product data (meta, image maps, soft-delete tag) with it.
+      - name: Uninstall (cleanup + data preservation)
+        run: tests/stack/uninstall.sh
 
       - name: Tear down
         if: always()
