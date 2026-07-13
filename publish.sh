@@ -97,6 +97,29 @@ print(next((str(a["id"]) for a in r.get("assets") or [] if a["name"]==sys.argv[1
 	echo "  uploaded $name"
 }
 
+# Move a channel tag onto the commit being released.
+#
+# The updater only ever reads the update.json ASSET, so strictly this is not required for it
+# to work. But leaving the tag parked on whatever commit first created the channel makes the
+# `latest` release show a stale commit and a stale date in the UI — there is then no way to
+# tell from Forgejo whether a publish actually landed, which is exactly the kind of ambiguity
+# that makes people distrust a release pipeline. The tag should say what it means.
+#
+# Force-moving a channel tag does not disturb its release or its assets (the release is keyed
+# by tag NAME) — verified when v0.9.23 was re-tagged. Channel tags are `latest`/`latest-beta`,
+# which never match the release workflow's `v*` trigger, so this cannot recurse.
+move_tag() { # move_tag TAG
+	local tag="$1" push_url
+	push_url="$(printf '%s' "$FORGEJO_URL" | sed -E "s#^(https?://)#\1oauth2:$FORGEJO_TOKEN@#")/$FORGEJO_REPO.git"
+	git -C "$ROOT" tag -f "$tag" "$COMMIT" >/dev/null
+	if git -C "$ROOT" push -f "$push_url" "refs/tags/$tag" >/dev/null 2>&1; then
+		echo "  moved tag '$tag' -> ${COMMIT:0:7}"
+	else
+		# Non-fatal: the asset swap above is what the updater actually consumes.
+		echo "  WARNING: could not move tag '$tag' (assets are published regardless)" >&2
+	fi
+}
+
 DL_BASE="$FORGEJO_URL/$FORGEJO_REPO/releases/download/$TAG"
 
 echo "==> Building $SLUG-$VERSION.zip (download base: $DL_BASE)"
@@ -119,6 +142,7 @@ for CHANNEL in $CHANNELS; do
 		true)"
 	[ -n "$CHAN_ID" ] || { echo "ERROR: could not create/find release '$CHANNEL'" >&2; exit 1; }
 	upload_asset "$CHAN_ID" dist/update.json update.json
+	move_tag "$CHANNEL"
 done
 
 echo
