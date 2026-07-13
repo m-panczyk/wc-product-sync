@@ -391,7 +391,29 @@ wp transient delete wps_update_info
 
 ## Zmiany (Changelog)
 
-### 0.9.23 (current) — [krytyczne] nieudane pobranie obrazu kasowało obrazy lokalne
+### 0.9.24 (current) — [krytyczne] błąd pobierania raportowany jako sukces
+
+- **[krytyczne] 401 ze źródła wyglądał jak udana synchronizacja.** Błąd pobierania (złe klucze API,
+  klucz użytkownika bez dostępu do produktów, źródło pod `http://` — WooCommerce przyjmuje Basic auth
+  **tylko po HTTPS**) był logowany, ale **nie zwiększał licznika błędów**. Przebieg kończył się
+  `0/0/0`, `błędy: 0` i **zielonym** komunikatem „Zakończono". Operator nie miał jak odróżnić awarii
+  uwierzytelniania od pustego katalogu.
+- **[krytyczne] Puste źródło (HTTP 200 + pusta lista) mogło wyczyścić cały katalog.** Klucz API
+  przypisany do użytkownika bez dostępu do produktów zwraca „brak produktów", a nie „brak uprawnień".
+  Przy `force_full_sync` / `deletion_mode=hard` oznaczało to „wszystko zniknęło ze źródła" → skasowanie
+  **całego** lokalnego katalogu na podstawie złego klucza.
+- **Naprawa:** zerowy widok źródła w świeżym przebiegu jest teraz **błędem** i oznacza pobranie jako
+  niepewne (`fetch_had_error`), co blokuje **wszystkie** ścieżki usuwania (ten sam bezpiecznik co przy
+  błędzie REST i przekroczeniu capa kluczy, v0.9.19). Źródło realnie puste zsynchronizuje zero i
+  **nie usunie niczego** — odmowa działania jest odwracalna, skasowany katalog nie.
+- **Widoczność:** błędy pobierania (strony produktów i atrybutów globalnych) zwiększają licznik
+  `błędy`, trafiają do raportu przebiegu, a komunikat w adminie jest **czerwony** (`notice-error`),
+  gdy błędy > 0 **lub** gdy nie dotknięto ani jednego produktu — z podpowiedzią najczęstszych przyczyn
+  (klucze, uprawnienie „Odczyt", źródło po HTTP).
+- Regresja przykryta testem e2e (faza 4): puste źródło + `force_full_sync=1` → katalog na celu
+  **nienaruszony**, przebieg raportuje `błędy=1`.
+
+### 0.9.23 — [krytyczne] nieudane pobranie obrazu kasowało obrazy lokalne
 
 - **[krytyczne] Utrata danych przy chwilowym błędzie sieci.** Gdy źródło podmieniło obraz produktu,
   a cel nie zdołał pobrać nowego (blip sieci, niezgodność TLS, 502), `sync_product_images()` szło

@@ -339,5 +339,46 @@ docker compose cp mu/00-e2e-http-urls.php src-wp:/var/www/html/wp-content/mu-plu
 [ "$FAIL" -eq 0 ] || exit 1
 echo "  PASS: existing images preserved, failure counted as an error"
 
+# --- Phase 4: an empty source must never wipe the target ----------------------------------
+#
+# HTTP 200 + an empty list is what the source returns when the API key belongs to a user who
+# cannot see products, when the source URL points at the wrong site, or when nothing is
+# published. It is indistinguishable from a genuinely empty catalog — and it used to be
+# treated as a successful sync of nothing, reporting "błędy: 0" behind a green notice.
+#
+# That is a catalog-wipe waiting to happen: with force_full_sync (or deletion_mode=hard), a
+# zero-product view of the source means "everything was deleted upstream". A bad API key would
+# take the entire local catalog with it.
+echo "==> Phase 4: an empty source must be an error, and must delete nothing"
+
+BEFORE_N="$(twp eval 'echo count( get_posts( array( "post_type" => "product", "numberposts" => -1, "fields" => "ids", "post_status" => "any" ) ) );')"
+echo "    target holds $BEFORE_N products"
+
+swp eval '
+foreach ( get_posts( array( "post_type" => array( "product", "product_variation" ), "numberposts" => -1, "fields" => "ids", "post_status" => "any" ) ) as $id ) {
+	wp_delete_post( $id, true );
+}' >/dev/null
+echo "    source emptied (simulates a key that cannot see products)"
+
+opt force_full_sync 1      # the most dangerous mode: deletes anything not refreshed
+twp eval 'foreach ( glob( WP_CONTENT_DIR . "/uploads/wc-logs/wc-product-sync*.log" ) as $f ) { unlink( $f ); }' >/dev/null
+drive >/dev/null
+opt force_full_sync 0
+
+AFTER_N="$(twp eval 'echo count( get_posts( array( "post_type" => "product", "numberposts" => -1, "fields" => "ids", "post_status" => "any" ) ) );')"
+ERRS="$(twp eval '$r = get_option( "wps_last_sync_result" ); echo (int) ( $r["errors"] ?? 0 );')"
+
+FAIL4=0
+if [ "$AFTER_N" -ne "$BEFORE_N" ]; then
+	echo "  FAIL: an empty source DELETED products ($BEFORE_N -> $AFTER_N)" >&2
+	FAIL4=1
+fi
+if [ "$ERRS" -lt 1 ]; then
+	echo "  FAIL: an empty source reported błędy=$ERRS — a broken API key looks like success" >&2
+	FAIL4=1
+fi
+[ "$FAIL4" -eq 0 ] || exit 1
+echo "  PASS: $AFTER_N products intact, run reported błędy=$ERRS"
+
 echo
-echo "e2e PASS (multi-batch sync + force-full + image-failure safety)"
+echo "e2e PASS (multi-batch sync + force-full + image-failure + empty-source safety)"

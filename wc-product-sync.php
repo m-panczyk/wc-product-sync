@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.23
+ * Version:           0.9.24
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -810,16 +810,33 @@ $defaults = array(
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Synchronizacja produktów WooCommerce', 'wc-product-sync' ); ?></h1>
 
-			<?php if ( isset( $_GET['synced'] ) ) : ?>
-				<div class="notice notice-success is-dismissible"><p>
+			<?php
+			if ( isset( $_GET['synced'] ) ) :
+				$n_created = (int) ( $_GET['created'] ?? 0 );
+				$n_updated = (int) ( $_GET['updated'] ?? 0 );
+				$n_skipped = (int) ( $_GET['skipped'] ?? 0 );
+				$n_errors  = (int) ( $_GET['errors'] ?? 0 );
+				// A run that touched NOTHING is not a success, even with no counted error: it
+				// means the source returned an empty catalog, which in practice means a broken
+				// source URL or a status filter that matched nothing. Never paint that green.
+				$nothing   = ( 0 === $n_created + $n_updated + $n_skipped );
+				$css       = ( $n_errors > 0 || $nothing ) ? 'notice-error' : 'notice-success';
+				?>
+				<div class="notice <?php echo esc_attr( $css ); ?> is-dismissible"><p>
 					<?php
 					printf(
 						esc_html__( 'Zakończono. Utworzono: %1$d, zaktualizowano: %2$d, pominięto: %3$d, błędy: %4$d. Szczegóły w logach WooCommerce.', 'wc-product-sync' ),
-						(int) ( $_GET['created'] ?? 0 ),
-						(int) ( $_GET['updated'] ?? 0 ),
-						(int) ( $_GET['skipped'] ?? 0 ),
-						(int) ( $_GET['errors'] ?? 0 )
+						$n_created,
+						$n_updated,
+						$n_skipped,
+						$n_errors
 					);
+					if ( $n_errors > 0 || $nothing ) {
+						echo '<br><strong>';
+						esc_html_e( 'Ze źródła nie pobrano żadnych produktów.', 'wc-product-sync' );
+						echo '</strong> ';
+						esc_html_e( 'Najczęstsze przyczyny: błędne Consumer Key/Secret, klucz bez uprawnienia „Odczyt", albo źródło pod adresem http:// — WooCommerce przyjmuje klucze API tylko po HTTPS. Dokładny powód (np. HTTP 401) jest w logach: WooCommerce → Status → Logi, źródło „wc-product-sync".', 'wc-product-sync' );
+					}
 					?>
 				</p></div>
 			<?php elseif ( isset( $_GET['started'] ) ) : ?>
@@ -1475,7 +1492,18 @@ $defaults = array(
 		// soft-delete on a partial view could wrongly draft valid products. Retry on the next run.
 		if ( $this->attributes_fetch_failed ) {
 			$this->fetch_had_error = true;
-			$this->log( 'error', 'Nie pobrano definicji atrybutów globalnych ze źródła — przerywam ten przebieg bez zmian w produktach. Zostanie ponowiony.' );
+			$msg = 'Nie pobrano definicji atrybutów globalnych ze źródła — przerywam ten przebieg bez zmian w produktach. Zostanie ponowiony.';
+			// Count it, for the same reason as the product-page failure below: this is the FIRST
+			// request of a run, so a bad key or an HTTP-only source aborts here — and without this
+			// the whole run reported 0/0/0, "błędy: 0" and a green success notice.
+			$stats['errors']++;
+			$this->report_add( 'errors', array(
+				'name'   => '—',
+				'sku'    => '—',
+				'type'   => '—',
+				'reason' => $msg,
+			) );
+			$this->log( 'error', $msg );
 			if ( ! empty( $progress ) ) {
 				$still_batching = true; // resumed run: keep progress so the resume retries
 			}
@@ -1493,7 +1521,19 @@ $defaults = array(
 				$this->fetch_had_error  = true;
 				$fetch_had_error         = true;
 				$count                   = 0; // Prevent undefined $count warning after break
-				$this->log( 'error', 'Pobieranie strony ' . $page . ': ' . $batch->get_error_message() );
+				$msg = 'Pobieranie strony ' . $page . ': ' . $batch->get_error_message();
+				// COUNT IT. Without this the run ends 0/0/0 with "błędy: 0" and a green
+				// "Zakończono" notice — a 401 from the source (bad keys, or a plain-HTTP source,
+				// which WooCommerce rejects for Basic auth) looked exactly like a successful sync
+				// of an empty catalog. The operator had no way to tell the difference.
+				$stats['errors']++;
+				$this->report_add( 'errors', array(
+					'name'   => '—',
+					'sku'    => '—',
+					'type'   => '—',
+					'reason' => $msg,
+				) );
+				$this->log( 'error', $msg );
 				break;
 			}
 
@@ -1607,6 +1647,40 @@ $defaults = array(
 
 		$page++;
 		} while ( $count === $per_page );
+
+		// AN EMPTY SOURCE IS NOT A SUCCESSFUL SYNC — IT IS A RED FLAG.
+		//
+		// HTTP 200 with an empty list is what you get when the API key belongs to a user who
+		// cannot see products (WooCommerce answers "no products", not "forbidden"), when the
+		// source URL points at the wrong site, or when the status filter matches nothing. All
+		// three look identical to a genuinely empty catalog.
+		//
+		// Treating it as success is dangerous, not just unhelpful: a zero-product view of the
+		// source means "everything was deleted upstream", so force_full_sync / deletion_mode=hard
+		// would wipe the ENTIRE local catalog on the strength of a bad key. So: count it as an
+		// error and mark the fetch unsafe, which blocks every deletion path (same guard used for
+		// a failed fetch and for the source-key cap, v0.9.19).
+		//
+		// A legitimately empty source therefore syncs nothing and deletes nothing. That is the
+		// correct trade: refusing to act on an empty view can be undone, deleting a catalog cannot.
+		// `1 === $page` = a FRESH run that fetched nothing: the zero-count branch breaks before
+		// $page++, and a resume batch always starts at page >= 2 (see $page init above). A resume
+		// batch legitimately reading 0 past the end of a shrunken catalog must not trip this.
+		if ( 0 === $total_counted && ! $fetch_had_error && 1 === $page ) {
+			$this->fetch_had_error = true;
+			$fetch_had_error       = true;
+			$msg = 'Źródło zwróciło 0 produktów (HTTP 200). Nic nie zsynchronizowano i — dla bezpieczeństwa — nic nie usunięto. '
+				. 'Najczęstsze przyczyny: klucz API należy do użytkownika bez dostępu do produktów, zły URL źródła, '
+				. 'albo żaden produkt nie ma statusu „publish".';
+			$stats['errors']++;
+			$this->report_add( 'errors', array(
+				'name'   => '—',
+				'sku'    => '—',
+				'type'   => '—',
+				'reason' => $msg,
+			) );
+			$this->log( 'error', $msg );
+		}
 
 		// Record this batch's source keys so soft-delete on the final batch sees the whole
 		// catalog. Persist for real runs before any early return below (dry runs are single-pass
