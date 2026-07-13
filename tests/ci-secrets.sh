@@ -10,21 +10,24 @@
 #   FORGEJO_TOKEN  (required)  token with repo write access
 #   FORGEJO_URL    default https://git.panczyk.cc
 #   FORGEJO_REPO   default mpanczyk/wc-product-sync
-#   SSH_KEY_FILE   private key the runner uses to reach the rig (default ~/.ssh/id_rsa)
+#   SSH_KEY_FILE   private key the runner uses to reach the rig (default ~/.ssh/wps-ci)
 #   RELEASE_TOKEN  optional; also uploaded, used by release.yaml
 #
-# NOTE ON THE KEY: whatever you point SSH_KEY_FILE at is handed to every CI job. Prefer a
-# dedicated key authorized only on the QNAP and the source box over your personal one:
-#   ssh-keygen -t ed25519 -f ~/.ssh/wps-ci -N ''
+# NOTE ON THE KEY: whatever SSH_KEY_FILE points at is handed to every CI job, and any branch
+# anyone pushes can read it. It must be a DEDICATED key — never a personal one:
+#   ssh-keygen -t ed25519 -f ~/.ssh/wps-ci -N '' -C 'wps-ci@forgejo-actions'
 #   ssh-copy-id -i ~/.ssh/wps-ci.pub <QNAP_SSH>
 #   ssh-copy-id -i ~/.ssh/wps-ci.pub <SRC_SSH>
+#
+# NOTE ON RELEASE_TOKEN: a dedicated Forgejo token, not your personal one. release.yaml falls
+# back to the automatic per-run token if this is unset.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN is required}"
 FORGEJO_URL="${FORGEJO_URL:-https://git.panczyk.cc}"
 FORGEJO_REPO="${FORGEJO_REPO:-mpanczyk/wc-product-sync}"
-SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/id_rsa}"
+SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/wps-ci}"
 ENV_FILE="$DIR/perf.env"
 
 [ -f "$ENV_FILE" ]     || { echo "ERROR: $ENV_FILE not found (copy from perf.env.example)" >&2; exit 1; }
