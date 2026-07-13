@@ -458,25 +458,20 @@ Workflows żyją w **`.forgejo/workflows/`** (jedyny katalog — Forgejo czyta w
 
 | Workflow | Wyzwalacz | Co robi |
 |---|---|---|
-| `ci.yaml` | push do `main`, PR | `php -l`, `bash -n`, **próbne zbudowanie paczki** (`./build.sh`). Bez rigu, bez efektów ubocznych. |
-| `rig-tests.yaml` | nocny cron + ręcznie | Parity (price → stock) i benchmark wydajności na **żywym rigu**. |
-| `release.yaml` | tag `v*` | `publish.sh` — buduje ZIP, tworzy wydanie, podmienia `update.json` w `latest`. |
+| `ci.yaml` | push do `main`, PR | `php -l`, `bash -n`, **próbne zbudowanie paczki** (`./build.sh`). |
+| `e2e.yaml` | push do `main`, PR | Efemeryczne sklepy: parytet + force-full + **wydajność A/B**. |
+| `release.yaml` | tag `v*` | `publish.sh` — buduje ZIP, tworzy wydanie, podmienia `update.json` w kanale. |
 
-**Dlaczego testy rigowe nie chodzą na każdym pushu:** mutują produkty na **żywym sklepie źródłowym**
-i uruchamiają realny sync na celu. Wtyczka ma globalną blokadę synchronizacji (`wps_sync_running`,
-pełny i szybki sync wykluczają się), więc równoległe joby wygryzałyby się nawzajem o tę blokadę i dawały
-losowe czerwone buildy. Dlatego: `concurrency: wps-rig` (jeden przebieg na raz), `needs:` (perf dopiero
-po parity) oraz price/stock jako **kolejne kroki**, nie równoległe joby.
+**CI nie dotyka rigu LAN i nie ma żadnych sekretów.** Testy stawiają własne sklepy WooCommerce
+w kontenerach obok joba (ten sam demon DinD) i kasują je po sobie. Żadnego klucza SSH, żadnego
+dostępu do produkcji, żadnych mutacji na cudzych danych.
 
-**Sekrety** (Settings → Actions → Secrets). Testy rigowe generują z nich `tests/perf.env`, bo skrypty
-robią `source tests/perf.env`, a plik jest gitignorowany:
+Skrypty rigowe (`tests/perf-run.sh`, `tests/sync-parity-test.sh`, `tests/systemd/`) zostają jako
+**narzędzia ręczne** do pomiarów na realnym sprzęcie — nie są już częścią CI.
 
-`QNAP_SSH`, `QNAP_DOCKER`, `QNAP_PROJECT`, `GRAFANA`, `GRAFANA_TOKEN`, `INFLUX`, `INFLUX_ORG`,
-`INFLUX_TOKEN`, `SRC_SSH`, `SRC_CONTAINER`, `SRC_PROJECT` — plus `RIG_SSH_KEY` i `RIG_KNOWN_HOSTS`
-(klucz SSH runnera do QNAP-a i źródła) oraz `RELEASE_TOKEN` (token z prawem zapisu do repo; bez niego
-release używa automatycznego tokenu przebiegu).
-
-**Wymagania runnera:** `php-cli`, `python3`, `curl`, `zip`, `unzip`, `ssh` na hoście runnera.
+**Wymagania runnera:** joby lecą w obrazie `node:22-bookworm` (etykieta `self-hosted`), a brakujące
+narzędzia doinstalowuje krok `Toolchain`. Runner musi mieć dostęp do demona DinD — job wykrywa go
+sam na swoim domyślnym gateway'u.
 
 ### Efemeryczny rig e2e (`tests/stack/`)
 
@@ -487,6 +482,7 @@ SSH ani sekretów** — działa tak samo na laptopie i w CI, i niczego nie mutuj
 tests/stack/up.sh      # build ZIP-a → 2 sklepy → WP+WC → klucze REST → instalacja wtyczki z ZIP-a
 tests/stack/seed.sh    # deterministyczny katalog (stały seed → powtarzalne błędy)
 tests/stack/e2e.sh     # pełny sync + parytet + force-full
+tests/stack/perf.sh    # wydajność: A/B względem ostatniego tagu
 tests/stack/down.sh    # kasuje wszystko razem z wolumenami
 ```
 
@@ -501,6 +497,26 @@ sprawdziłby żadnego z tych przypadków.
 
 Faza 2 usuwa kilka produktów ze źródła, włącza `force_full_sync` i sprawdza, że z celu zniknęły
 **dokładnie te** produkty — reszta katalogu przeżyła.
+
+### Wydajność: pomiar A/B (`tests/stack/perf.sh`)
+
+Bezwzględny czas synchronizacji zmierzony w kontenerze na współdzielonym NAS-ie (DinD, sterownik
+`vfs`) jest **bezwartościowy** — ten sam kod potrafi się wahać dwukrotnie między przebiegami. Dlatego
+`perf.sh` nigdy nie mówi „sync trwa N sekund". Synchronizuje **ten sam** zaseedowany katalog dwa razy,
+na tym samym sprzęcie w tej samej minucie: raz wtyczką z **ostatniego tagu** (`v[0-9]*`), raz z drzewa
+roboczego. Szum środowiskowy uderza w obie strony jednakowo, więc **stosunek** jest stabilny, choć
+liczby bezwzględne nie są.
+
+- **Rozgrzewka** (odrzucana) — pierwszy sync płaci za opcache, bufory MySQL i pobranie obrazków;
+  bez niej strona idąca druga wygrywałaby bez powodu.
+- **Przeplot i best-of-2** — przy **identycznym kodzie** po obu stronach ten stelaż potrafił pokazać
+  **1.14×**; to jest podłoga szumu. Przeplot kasuje dryf, a `min` odrzuca chwilowe zacięcia (sąsiedni
+  kontener, flush ZFS-a) zamiast brać je za wynik. Po tej zmianie identyczny kod daje ~0.98×.
+- **Progi:** `WPS_PERF_WARN` (domyślnie 1.2×) → ostrzeżenie, `WPS_PERF_MAX` (1.5×) → błąd.
+
+Łapie to regresje **kodu** (dodatkowy round-trip REST na produkt, obrazki pobierane mimo mapy,
+rollup odpalany przy no-op update). **Nie** odpowie na pytanie „ile trwa pełny sync na realnym
+QNAP-ie" — to własność sprzętu, nie kodu; od tego są ręczne skrypty rigowe.
 
 **Ograniczenia rigu (tylko na źródle, produkcji nie dotyczą):** WooCommerce przyjmuje Basic auth
 kluczem CK/CS **tylko gdy `is_ssl()`**; stack jest po czystym HTTP, więc `wp-config` ustawia

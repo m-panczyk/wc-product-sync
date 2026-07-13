@@ -23,7 +23,7 @@ jobs:
           # iproute2: node:22-bookworm ships no `ip`, and the next step needs it to find
           # the DinD daemon on the default gateway.
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            ca-certificates curl gnupg zip unzip python3 iproute2 >/dev/null
+            ca-certificates curl gnupg zip unzip python3 iproute2 bc >/dev/null
           # Docker's own repo — Debian ships no compose v2 plugin.
           install -m 0755 -d /etc/apt/keyrings
           curl -fsSL https://download.docker.com/linux/debian/gpg \
@@ -36,6 +36,10 @@ jobs:
           docker --version && docker compose version
 
       - uses: actions/checkout@v4
+        with:
+          # perf.sh checks out the last release tag into a worktree to build the
+          # baseline — a shallow clone has neither the tags nor the history.
+          fetch-depth: 0
 
       # This job runs INSIDE DinD, so the daemon is reachable at the job's default
       # gateway. The stack comes up as siblings of this container, on that same daemon.
@@ -56,6 +60,11 @@ jobs:
 
       - name: Sync + parity + force-full
         run: tests/stack/e2e.sh
+
+      # Paired A/B against the last release tag, on the same stack. Absolute timings here
+      # are meaningless (shared NAS, DinD, vfs); the ratio is not.
+      - name: Performance (baseline vs candidate)
+        run: tests/stack/perf.sh
 
       - name: Tear down
         if: always()
