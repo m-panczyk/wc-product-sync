@@ -33,8 +33,14 @@ foreach ( get_posts( array( "post_type" => array( "product", "product_variation"
 	wp_delete_post( $id, true );
 }
 
-$cat = term_exists( "e2e", "product_cat" ) ?: wp_insert_term( "e2e", "product_cat" );
-$cat_id = (int) $cat["term_id"];
+// Two categories, so we can check a product carrying BOTH survives the sync — a single
+// shared category would pass even if the plugin only ever copied the first one.
+$cat_ids = array();
+foreach ( array( "e2e", "e2e-secondary" ) as $slug ) {
+	$t = term_exists( $slug, "product_cat" ) ?: wp_insert_term( $slug, "product_cat" );
+	$cat_ids[] = (int) $t["term_id"];
+}
+$cat_id = $cat_ids[0];
 
 // A 1x1 PNG is enough to exercise the sideload + _wps_image_map path without paying
 // for real image bytes on every run.
@@ -61,8 +67,31 @@ for ( $i = 1; $i <= $simple; $i++ ) {
 	$p->set_manage_stock( true );
 	$p->set_stock_quantity( mt_rand( 0, 250 ) );
 	$p->set_status( "publish" );
-	$p->set_category_ids( array( $cat_id ) );
-	if ( $n < $images ) { $p->set_image_id( $make_image( ++$n ) ); }
+	// Every field the plugin claims to sync (sync_fields), so an unsynced one is a failure
+	// rather than something nobody looked at. Unicode in the body: a broken charset on the
+	// REST hop would mangle it, and ASCII-only text would never notice.
+	$p->set_description( sprintf( "Opis produktu %03d — zażółć gęślą jaźń. <strong>HTML</strong> & encje.", $i ) );
+	$p->set_short_description( sprintf( "Krótki opis %03d", $i ) );
+	$p->set_weight( number_format( mt_rand( 10, 5000 ) / 100, 2, ".", "" ) );
+	$p->set_length( (string) mt_rand( 1, 60 ) );
+	$p->set_width( (string) mt_rand( 1, 60 ) );
+	$p->set_height( (string) mt_rand( 1, 60 ) );
+	// Every 5th product is on sale and in both categories.
+	if ( 0 === $i % 5 ) {
+		$p->set_sale_price( number_format( (float) $p->get_regular_price() * 0.8, 2, ".", "" ) );
+		$p->set_category_ids( $cat_ids );
+	} else {
+		$p->set_category_ids( array( $cat_id ) );
+	}
+	if ( $n < $images ) {
+		$main = $make_image( ++$n );
+		$p->set_image_id( $main );
+		// The first image-bearing product also gets a GALLERY. A presence-only check
+		// (has an image: yes/no) would pass even if the gallery were dropped entirely.
+		if ( 1 === $n ) {
+			$p->set_gallery_image_ids( array( $make_image( 900 ), $make_image( 901 ) ) );
+		}
+	}
 	$p->save();
 }
 
@@ -104,5 +133,33 @@ for ( $i = 1; $i <= $grouped; $i++ ) {
 	$p->save();
 }
 
-printf( "seeded: %d products\n", count( get_posts( array( "post_type" => "product", "numberposts" => -1, "fields" => "ids", "post_status" => "any" ) ) ) );
+// --- Products the plugin MUST skip -------------------------------------------------------
+// Nothing asserted these before, so "the plugin skips drafts / no-SKU products" was folklore.
+// e2e.sh checks each of these is absent from the target.
+
+// Draft: sync_statuses defaults to publish only.
+$d = new WC_Product_Simple();
+$d->set_name( "E2E Draft 001" );
+$d->set_sku( "E2E-DRAFT-001" );
+$d->set_regular_price( "99.00" );
+$d->set_status( "draft" );
+$d->save();
+
+// Private: also outside the publish filter.
+$v = new WC_Product_Simple();
+$v->set_name( "E2E Private 001" );
+$v->set_sku( "E2E-PRIVATE-001" );
+$v->set_regular_price( "98.00" );
+$v->set_status( "private" );
+$v->save();
+
+// No SKU: matching is SKU-first, so this one has nothing to match on and is skipped.
+$k = new WC_Product_Simple();
+$k->set_name( "E2E NoSku 001" );
+$k->set_regular_price( "97.00" );
+$k->set_status( "publish" );
+$k->save();
+
+printf( "seeded: %d products (incl. draft/private/no-SKU skip cases)\n",
+	count( get_posts( array( "post_type" => "product", "numberposts" => -1, "fields" => "ids", "post_status" => "any" ) ) ) );
 '

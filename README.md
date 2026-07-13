@@ -223,7 +223,7 @@ Przykładowe komunikaty:
 
 ### Produkt się nie synchronizuje
 1. Sprawdź logi (`wc-product-sync`) czy nie ma błędów API.
-2. Upewnij się że źródło ma ustawione SKU — produkty bez SKU są pomijane.
+2. Produkty **bez SKU** są dopasowywane po nazwie (fallback), więc brak SKU sam w sobie nie blokuje synchronizacji — ale utrudnia dopasowanie przy zmianie nazwy. Ustaw SKU, jeśli możesz.
 3. Sprawdzaj statusy w adminie produktu — może być `draft` jeśli został soft-deleted.
 
 ### Duplicate products
