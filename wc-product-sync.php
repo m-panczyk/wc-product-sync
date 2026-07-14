@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.26
+ * Version:           0.9.27
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -1505,28 +1505,30 @@ $defaults = array(
 		// N6: if the global-attribute map couldn't be fetched, abort BEFORE touching any product.
 		// Rebuilding variable products without it would silently strip all their attributes, and
 		// soft-delete on a partial view could wrongly draft valid products. Retry on the next run.
+		// The attribute endpoint is a CONVENIENCE, not a requirement.
+		//
+		// /products/attributes is guarded by `manage_product_terms`, while /products only needs
+		// `read_private_products` — so an API key can list the whole catalog and still get 401
+		// here. That used to abort every run, leaving stores that cannot get a broader key with
+		// no way to sync at all.
+		//
+		// But the map only ever supplied two fields per attribute (name + slug), and WooCommerce
+		// already ships both inline in each product AND variation payload:
+		//     "attributes":[{"id":1,"name":"Kolor","slug":"pa_kolor","options":["Czerwony"]}]
+		// So when the endpoint is unavailable we learn the map from the payloads instead (see
+		// learn_attribute()). Nothing is lost: the endpoint's remaining fields (type, order_by,
+		// has_archives) are ones this plugin never reads — it hardcodes them when creating an
+		// attribute.
+		//
+		// The run is only aborted if an attribute turns out to be genuinely unresolvable, and that
+		// is handled per product, where it can be reported without blocking the whole catalog.
 		if ( $this->attributes_fetch_failed ) {
-			$this->fetch_had_error = true;
 			$msg = 'Nie pobrano definicji atrybutów globalnych ze źródła'
 				. ( $this->attributes_fetch_error ? ' (' . $this->attributes_fetch_error . ')' : '' )
-				. ' — przerywam ten przebieg bez zmian w produktach. Endpoint /products/attributes wymaga uprawnienia'
-				. ' „manage_product_terms" (Administrator lub Kierownik sklepu) — innego niż samo czytanie produktów,'
-				. ' więc klucz może działać na /products i mimo to nie mieć dostępu tutaj.';
-			// Count it, for the same reason as the product-page failure below: this is the FIRST
-			// request of a run, so a bad key or an HTTP-only source aborts here — and without this
-			// the whole run reported 0/0/0, "błędy: 0" and a green success notice.
-			$stats['errors']++;
-			$this->report_add( 'errors', array(
-				'name'   => '—',
-				'sku'    => '—',
-				'type'   => '—',
-				'reason' => $msg,
-			) );
-			$this->log( 'error', $msg );
-			if ( ! empty( $progress ) ) {
-				$still_batching = true; // resumed run: keep progress so the resume retries
-			}
-			return $stats;
+				. ' — kontynuuję, odtwarzając mapę atrybutów z payloadów produktów.'
+				. ' Endpoint /products/attributes wymaga uprawnienia „manage_product_terms"'
+				. ' (Administrator lub Kierownik sklepu) — innego niż samo czytanie produktów.';
+			$this->log( 'warning', $msg );
 		}
 
 		$total_counted    = 0;
@@ -2234,9 +2236,17 @@ $defaults = array(
 			$attr = new WC_Product_Attribute();
 
 			if ( ! empty( $a['id'] ) && (int) $a['id'] > 0 ) {
+				$this->learn_attribute( $a );
 				$map = $this->map_global_attribute( (int) $a['id'] );
 				if ( ! $map ) {
-					continue;
+					// Do NOT skip silently. The old `continue` dropped the attribute, which for a
+					// variable product means rebuilding it with no attributes at all — a silent
+					// wipe. Fail this product instead: it is reported as an error and left alone.
+					throw new \RuntimeException( sprintf(
+						'Nie udało się odwzorować atrybutu globalnego (ID=%d, nazwa=%s) — produkt pominięty, aby nie skasować mu atrybutów.',
+						(int) $a['id'],
+						(string) ( $a['name'] ?? '?' )
+					) );
 				}
 				$term_ids = array();
 				foreach ( ( $a['options'] ?? array() ) as $opt ) {
@@ -2261,6 +2271,24 @@ $defaults = array(
 			$pos++;
 		}
 		return $out;
+	}
+
+	/** Learn a global attribute from a product/variation payload, when /products/attributes was not
+	 *  readable. WooCommerce ships `id`, `name` and `slug` inline with every attribute it returns,
+	 *  and those two strings are the entire contents of the map we would have fetched. Older stores
+	 *  may omit `slug`; sanitize_title(name) reproduces it (map_global_attribute already falls back
+	 *  that way). No-op when the id is already known, so the endpoint's data always wins. */
+	private function learn_attribute( array $a ) {
+		$id = isset( $a['id'] ) ? (int) $a['id'] : 0;
+		if ( $id <= 0 || isset( $this->source_attributes[ $id ] ) ) {
+			return;
+		}
+		$slug = isset( $a['slug'] ) ? preg_replace( '/^pa_/', '', (string) $a['slug'] ) : '';
+		$name = isset( $a['name'] ) ? (string) $a['name'] : $slug;
+		if ( '' === $slug && '' === $name ) {
+			return; // genuinely unresolvable — the caller turns this into a reported error
+		}
+		$this->source_attributes[ $id ] = array( 'name' => $name, 'slug' => $slug );
 	}
 
 	private function map_global_attribute( $source_attr_id ) {
@@ -2438,9 +2466,13 @@ $defaults = array(
 		$out = array();
 		foreach ( $source_attrs as $a ) {
 			if ( ! empty( $a['id'] ) && (int) $a['id'] > 0 ) {
+				$this->learn_attribute( $a );
 				$map = $this->map_global_attribute( (int) $a['id'] );
 				if ( ! $map ) {
-					continue;
+					throw new \RuntimeException( sprintf(
+						'Nie udało się odwzorować atrybutu globalnego wariacji (ID=%d) — wariacja pominięta.',
+						(int) $a['id']
+					) );
 				}
 				$option = $a['option'] ?? '';
 				$term   = get_term_by( 'name', $option, $map['taxonomy'] );
