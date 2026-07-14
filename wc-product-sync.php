@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.25
+ * Version:           0.9.26
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -84,6 +84,8 @@ final class WC_Product_Sync {
 	private $variations_fetch_error = false;
 	/** Czy pobieranie definicji atrybutów globalnych się nie powiodło (blokada, by nie zniszczyć wariantów) */
 	private $attributes_fetch_failed = false;
+	/** Powód nieudanego pobrania atrybutów globalnych (np. "HTTP 401 z ...") — do raportu w adminie */
+	private $attributes_fetch_error = '';
 	/** Bufor raportu bieżącego batcha: bucket => lista wpisów (scalany do opcji po batchu) */
 	private $run_report = array();
 	/** Jak dopasowano ostatni produkt: 'SKU' | 'source_id' | 'nazwa' | '' (nowy) */
@@ -1334,12 +1336,21 @@ $defaults = array(
 	private function fetch_source_attributes() {
 		$out  = array();
 		$this->attributes_fetch_failed = false;
+		$this->attributes_fetch_error  = '';
 		$list = $this->api_get( '/wp-json/wc/v3/products/attributes', array( 'per_page' => 100 ) );
 		if ( is_wp_error( $list ) ) {
 			// Signal failure: without the global-attribute map, variable products would be
 			// rebuilt with NO attributes (map lookup → null → skipped), silently wiping them.
 			$this->attributes_fetch_failed = true;
-			$this->log( 'warning', 'Nie pobrano definicji atrybutów: ' . $list->get_error_message() );
+			// Keep the underlying reason. Without it the admin only ever saw "could not fetch
+			// attribute definitions", with no hint that it was an HTTP 401 — and this endpoint
+			// fails for a DIFFERENT reason than /products: WooCommerce guards it with
+			// `manage_product_terms`, not `read_private_products`, so a key whose user can list
+			// products may still be unable to read attributes.
+			$this->attributes_fetch_error = $list->get_error_message();
+			$this->log( 'error', 'Nie pobrano definicji atrybutów globalnych: ' . $this->attributes_fetch_error
+				. ' — endpoint /products/attributes wymaga uprawnienia "manage_product_terms" (Administrator lub Kierownik sklepu),'
+				. ' innego niż samo czytanie produktów.' );
 			return $out;
 		}
 		foreach ( $list as $a ) {
@@ -1496,7 +1507,11 @@ $defaults = array(
 		// soft-delete on a partial view could wrongly draft valid products. Retry on the next run.
 		if ( $this->attributes_fetch_failed ) {
 			$this->fetch_had_error = true;
-			$msg = 'Nie pobrano definicji atrybutów globalnych ze źródła — przerywam ten przebieg bez zmian w produktach. Zostanie ponowiony.';
+			$msg = 'Nie pobrano definicji atrybutów globalnych ze źródła'
+				. ( $this->attributes_fetch_error ? ' (' . $this->attributes_fetch_error . ')' : '' )
+				. ' — przerywam ten przebieg bez zmian w produktach. Endpoint /products/attributes wymaga uprawnienia'
+				. ' „manage_product_terms" (Administrator lub Kierownik sklepu) — innego niż samo czytanie produktów,'
+				. ' więc klucz może działać na /products i mimo to nie mieć dostępu tutaj.';
 			// Count it, for the same reason as the product-page failure below: this is the FIRST
 			// request of a run, so a bad key or an HTTP-only source aborts here — and without this
 			// the whole run reported 0/0/0, "błędy: 0" and a green success notice.

@@ -248,6 +248,45 @@ Sync jest wciąż aktywny lub został przerwany i blokada nie zwolniła się (TT
 DELETE FROM wp_options WHERE option_name = 'transient_wps_sync_running' OR option_name LIKE 'transient_timeout_wps_sync_running%';
 ```
 
+### Sync przerywa się na „Nie pobrano definicji atrybutów globalnych"
+
+Klucz działa na `/products`, ale **nie** na `/products/attributes`. To nie jest ten sam problem:
+WooCommerce pilnuje tych endpointów **różnymi uprawnieniami**.
+
+| Endpoint | Wymagane uprawnienie | Kto ma |
+|---|---|---|
+| `/wp-json/wc/v3/products` | `read_private_products` | Administrator, Kierownik sklepu |
+| `/wp-json/wc/v3/products/attributes` | **`manage_product_terms`** | Administrator, Kierownik sklepu |
+
+Rola z ograniczonymi uprawnieniami (albo klucz przypisany do użytkownika o zawężonej roli) potrafi
+**listować produkty i jednocześnie nie widzieć atrybutów**. Sprawdź to wprost:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -u "ck_xxx:cs_xxx" \
+  "https://zrodlo.pl/wp-json/wc/v3/products/attributes"
+```
+
+**Dlaczego wtyczka przerywa cały przebieg, a nie tylko pomija atrybuty:** bez mapy atrybutów
+globalnych produkty `variable` zostałyby przebudowane **bez żadnych atrybutów** — czyli po cichu
+wyczyszczone. Lepiej nie zrobić nic i ponowić, niż zniszczyć dane.
+
+**Naprawa:** wygeneruj klucz na koncie **Administratora** lub **Kierownika sklepu** (uprawnienie
+klucza: Odczyt).
+
+### Produkty `variable` bez SKU — czy się zduplikują?
+
+**Nie.** Zweryfikowane na rigu (2026-07-14), trzy kolejne przebiegi + zmiana nazwy na źródle:
+
+- **Rodzic** (`variable`) dopasowywany jest po **SKU → `_wps_source_id` → nazwie**. Po **pierwszym**
+  syncu dostaje `_wps_source_id`, więc dalej wiąże się po **ID źródła** — zmiana nazwy na źródle
+  aktualizuje produkt zamiast tworzyć duplikat.
+- **Wariacje** dopasowywane są po **SKU**, a gdy go nie ma — po **sygnaturze atrybutów** (kombinacji
+  wartości, np. `pa_kolor=czerwony`). Wariacja bez SKU też się nie duplikuje.
+
+**Jedyne realne ryzyko jest przy pierwszym syncu**, zanim powstanie `_wps_source_id`: jedynym uchwytem
+jest wtedy nazwa, a fallback zadziała tylko gdy trafi w **dokładnie jeden** lokalny produkt
+nieprzypisany do innego źródła. Na pustym celu nie ma problemu — produkty po prostu powstaną.
+
 ### Klucz API nie działa
 Sprawdź w WooCommerce → Ustawienia → Zaawansowane → REST API czy Consumer Key i Consumer Secret są prawidłowe oraz mają uprawnienia "Read/Write" do produktów.
 
@@ -480,7 +519,19 @@ mapa `_wps_image_map` już nie istnieje.
 
 ## Zmiany (Changelog)
 
-### 0.9.25 (current) — updater działa domyślnie, bez konfiguracji
+### 0.9.26 (current) — czytelny błąd przy braku dostępu do atrybutów globalnych
+
+- **Powód przerwania przebiegu widać wreszcie w adminie.** Gdy nie udało się pobrać
+  `/products/attributes`, raport pokazywał tylko ogólnik „Nie pobrano definicji atrybutów globalnych",
+  bez kodu HTTP — a prawdziwa przyczyna (`HTTP 401`) leżała wyłącznie w logu, jako `warning`. Teraz
+  komunikat niesie **kod HTTP, adres endpointu i wskazówkę**, że ten endpoint wymaga uprawnienia
+  **`manage_product_terms`** (Administrator / Kierownik sklepu) — **innego** niż czytanie produktów.
+- To jest realna pułapka: klucz API potrafi działać na `/products` i **jednocześnie** dostawać 401 na
+  `/products/attributes`, bo WooCommerce pilnuje tych endpointów różnymi uprawnieniami. Objawiało się
+  to jako przerwany przebieg bez zrozumiałego powodu.
+- Błąd loguje się teraz jako `error` (było: `warning`).
+
+### 0.9.25 — updater działa domyślnie, bez konfiguracji
 
 - **Wbudowany publiczny kanał aktualizacji** (`DEFAULT_UPDATE_URL`). Repozytorium jest publiczne, więc
   świeża instalacja dostaje aktualizacje w **Wtyczki → Aktualizuj** bez stałej w `wp-config.php` i bez
