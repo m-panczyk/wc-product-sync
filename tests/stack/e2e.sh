@@ -393,16 +393,22 @@ echo "==> Phase 3b: global attributes must still sync when /products/attributes 
 
 cat > /tmp/wps-block-attr.php <<'PHP'
 <?php
-// Test rig only: make /products/attributes return the exact 401 a key without
-// manage_product_terms would get, while leaving /products fully readable.
+// Test rig only. Two jobs:
+//  1. Record every hit on /products/attributes, so the test can assert the plugin does not even
+//     ASK for it — a request that is never made cannot 401, cannot need a permission, and cannot
+//     spam a warning into the log on every run.
+//  2. If it is asked for anyway, return the exact 401 a key without manage_product_terms gets,
+//     so the fallback path is exercised rather than accidentally succeeding.
 add_filter( 'rest_pre_dispatch', function ( $result, $server, $request ) {
 	if ( '/wc/v3/products/attributes' === $request->get_route() ) {
+		file_put_contents( '/tmp/wps-attr-hits', "hit\n", FILE_APPEND );
 		return new WP_Error( 'woocommerce_rest_cannot_view', 'Przepraszamy, ale nie możesz listować zasobów.', array( 'status' => 401 ) );
 	}
 	return $result;
 }, 10, 3 );
 PHP
 docker compose cp /tmp/wps-block-attr.php src-wp:/var/www/html/wp-content/mu-plugins/wps-block-attr.php >/dev/null
+docker compose exec -T -u 0 src-wp rm -f /tmp/wps-attr-hits >/dev/null 2>&1 || true
 
 # Force a real rebuild: drop the product and the attribute taxonomy from the target, so the sync
 # has to recreate both WITHOUT the endpoint. Otherwise it would pass on leftovers from phase 1.
@@ -428,20 +434,28 @@ if ( count( $p->get_children() ) < 2 ) { echo "no-variations"; exit; }
 echo "ok";
 ')"
 ERRS_3B="$(twp eval '$r = get_option( "wps_last_sync_result" ); echo (int) ( $r["errors"] ?? 0 );')"
+HITS="$(docker compose exec -T src-wp sh -c 'wc -l < /tmp/wps-attr-hits 2>/dev/null || echo 0' | tr -d '\r ')"
 
 docker compose exec -T -u 0 src-wp rm -f /var/www/html/wp-content/mu-plugins/wps-block-attr.php
 
 if [ "$ATTR_OK" != "ok" ]; then
-	echo "  FAIL: with /products/attributes at 401 the global attribute did not sync ($ATTR_OK)" >&2
-	echo "        A store whose key cannot read that endpoint would lose its variable products'" >&2
-	echo "        attributes entirely." >&2
+	echo "  FAIL: the global attribute did not sync ($ATTR_OK)" >&2
+	echo "        A store whose key cannot read /products/attributes would lose its variable" >&2
+	echo "        products' attributes entirely." >&2
 	exit 1
 fi
 if [ "$ERRS_3B" -ne 0 ]; then
-	echo "  FAIL: the run reported błędy=$ERRS_3B — losing that endpoint must not be an error" >&2
+	echo "  FAIL: the run reported błędy=$ERRS_3B — not having that endpoint must not be an error" >&2
 	exit 1
 fi
-echo "  PASS: pa_kolor rebuilt from the product payloads, run clean (błędy=0)"
+# The strong claim: not "it survives a 401", but "it never asks". An unmade request cannot fail,
+# cannot demand a capability the key does not have, and cannot log a warning on every single run.
+if [ "$HITS" != "0" ]; then
+	echo "  FAIL: /products/attributes was requested $HITS time(s) — it should never be needed," >&2
+	echo "        since name+slug arrive inline with every product and variation payload." >&2
+	exit 1
+fi
+echo "  PASS: pa_kolor built from payloads; /products/attributes never requested (0 hits), błędy=0"
 
 # --- Phase 4: an empty source must never wipe the target ----------------------------------
 #

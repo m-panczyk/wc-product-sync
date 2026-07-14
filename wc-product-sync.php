@@ -86,6 +86,8 @@ final class WC_Product_Sync {
 	private $attributes_fetch_failed = false;
 	/** Powód nieudanego pobrania atrybutów globalnych (np. "HTTP 401 z ...") — do raportu w adminie */
 	private $attributes_fetch_error = '';
+	/** Czy w tym przebiegu próbowano już fallbacku na /products/attributes (maks. raz) */
+	private $attributes_fetch_tried = false;
 	/** Bufor raportu bieżącego batcha: bucket => lista wpisów (scalany do opcji po batchu) */
 	private $run_report = array();
 	/** Jak dopasowano ostatni produkt: 'SKU' | 'source_id' | 'nazwa' | '' (nowy) */
@@ -1348,9 +1350,9 @@ $defaults = array(
 			// `manage_product_terms`, not `read_private_products`, so a key whose user can list
 			// products may still be unable to read attributes.
 			$this->attributes_fetch_error = $list->get_error_message();
-			$this->log( 'error', 'Nie pobrano definicji atrybutów globalnych: ' . $this->attributes_fetch_error
-				. ' — endpoint /products/attributes wymaga uprawnienia "manage_product_terms" (Administrator lub Kierownik sklepu),'
-				. ' innego niż samo czytanie produktów.' );
+			$this->log( 'warning', 'Fallback /products/attributes nieudany: ' . $this->attributes_fetch_error
+				. ' — endpoint wymaga uprawnienia "manage_product_terms" (Administrator lub Kierownik sklepu),'
+				. ' innego niż czytanie produktów. Mapa atrybutów jest odtwarzana z payloadów, więc zwykle nie jest potrzebny.' );
 			return $out;
 		}
 		foreach ( $list as $a ) {
@@ -1500,36 +1502,23 @@ $defaults = array(
 			$this->last_total_items = absint( $progress['total_items'] ); // keep exact count across batches
 		}
 
-		$this->source_attributes = $this->fetch_source_attributes();
-
-		// N6: if the global-attribute map couldn't be fetched, abort BEFORE touching any product.
-		// Rebuilding variable products without it would silently strip all their attributes, and
-		// soft-delete on a partial view could wrongly draft valid products. Retry on the next run.
-		// The attribute endpoint is a CONVENIENCE, not a requirement.
+		// NOTE: /products/attributes is NOT requested here — not up front, and normally not at all.
 		//
-		// /products/attributes is guarded by `manage_product_terms`, while /products only needs
-		// `read_private_products` — so an API key can list the whole catalog and still get 401
-		// here. That used to abort every run, leaving stores that cannot get a broader key with
-		// no way to sync at all.
+		// Every attribute the plugin has to resolve arrives inline with the product and variation
+		// payloads (`id` + `name` + `slug`), and those two strings were the entire contents of the
+		// map that endpoint used to provide. Its other fields (type, order_by, has_archives) are
+		// never read — they are hardcoded when an attribute is created. So calling it was pure
+		// overhead, and worse: it is guarded by `manage_product_terms` while /products only needs
+		// `read_private_products`, so on a perfectly valid key it could 401 and abort the run.
 		//
-		// But the map only ever supplied two fields per attribute (name + slug), and WooCommerce
-		// already ships both inline in each product AND variation payload:
-		//     "attributes":[{"id":1,"name":"Kolor","slug":"pa_kolor","options":["Czerwony"]}]
-		// So when the endpoint is unavailable we learn the map from the payloads instead (see
-		// learn_attribute()). Nothing is lost: the endpoint's remaining fields (type, order_by,
-		// has_archives) are ones this plugin never reads — it hardcodes them when creating an
-		// attribute.
-		//
-		// The run is only aborted if an attribute turns out to be genuinely unresolvable, and that
-		// is handled per product, where it can be reported without blocking the whole catalog.
-		if ( $this->attributes_fetch_failed ) {
-			$msg = 'Nie pobrano definicji atrybutów globalnych ze źródła'
-				. ( $this->attributes_fetch_error ? ' (' . $this->attributes_fetch_error . ')' : '' )
-				. ' — kontynuuję, odtwarzając mapę atrybutów z payloadów produktów.'
-				. ' Endpoint /products/attributes wymaga uprawnienia „manage_product_terms"'
-				. ' (Administrator lub Kierownik sklepu) — innego niż samo czytanie produktów.';
-			$this->log( 'warning', $msg );
-		}
+		// It survives only as a LAST-RESORT fallback, fetched lazily by map_global_attribute() if a
+		// payload ever turns up with an attribute id it cannot resolve (see there). On a normal run
+		// that request is never made, so a key without `manage_product_terms` syncs cleanly and
+		// silently — no request, no 401, no warning on every run.
+		$this->source_attributes        = array();
+		$this->attributes_fetch_failed  = false;
+		$this->attributes_fetch_error   = '';
+		$this->attributes_fetch_tried   = false;
 
 		$total_counted    = 0;
 		$source_keys      = array();
@@ -2293,6 +2282,21 @@ $defaults = array(
 
 	private function map_global_attribute( $source_attr_id ) {
 		$src = $this->source_attributes[ $source_attr_id ] ?? null;
+
+		// Last resort only. The payloads carry name+slug, so on any normal catalog this never
+		// fires and /products/attributes is never requested. It exists for the odd store whose
+		// payload omits both (very old WooCommerce); fetched at most once per run, and a failure
+		// here is not fatal — the caller reports the one product it could not map.
+		if ( ! $src && ! $this->attributes_fetch_tried ) {
+			$this->attributes_fetch_tried = true;
+			$this->log( 'info', sprintf(
+				'Atrybut globalny ID=%d nie ma nazwy/sluga w payloadzie — sięgam po /products/attributes.',
+				(int) $source_attr_id
+			) );
+			$this->source_attributes = $this->fetch_source_attributes() + $this->source_attributes;
+			$src = $this->source_attributes[ $source_attr_id ] ?? null;
+		}
+
 		if ( ! $src ) {
 			return null;
 		}
