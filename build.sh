@@ -20,7 +20,7 @@ VERSION="$(grep -m1 -oE 'Version:[[:space:]]*[0-9][0-9A-Za-z.-]*' "$SLUG.php" | 
 [ -n "$VERSION" ] || { echo "ERROR: could not read Version from $SLUG.php" >&2; exit 1; }
 
 # Files/dirs that ship in the package.
-INCLUDE=( "$SLUG.php" README.md LICENSE docs )
+INCLUDE=( "$SLUG.php" README.md CHANGELOG.md LICENSE docs )
 
 STAGE="$(mktemp -d)"
 DEST="$STAGE/$SLUG"
@@ -59,7 +59,7 @@ cat > dist/update.json <<JSON
   "last_updated": "$(date -u +%F)",
   "download_url": "$BASE_URL/$SLUG-$VERSION.zip",
   "sections": {
-    "changelog": "Pełna lista zmian w README.md (sekcja \"Zmiany (Changelog)\")."
+    "changelog": "Pełna lista zmian znajduje się w CHANGELOG.md (plik głównego repozytorium)."
   }
 }
 JSON
