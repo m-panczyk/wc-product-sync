@@ -133,6 +133,59 @@ for ( $i = 1; $i <= $grouped; $i++ ) {
 	$p->save();
 }
 
+// --- The "Ograniczenia" contract in README, as fixtures -----------------------------------
+// These exist so the supported/unsupported list cannot quietly drift from reality. Two of its
+// claims were simply false until they were checked against a real store.
+
+// GLOBAL attribute (pa_kolor) on a VARIABLE product — the README says attributes are supported,
+// and they are, but ONLY on variable products.
+$tax = "pa_kolor";
+if ( ! wc_attribute_taxonomy_id_by_name( "kolor" ) ) {
+	wc_create_attribute( array( "name" => "Kolor", "slug" => "kolor", "type" => "select" ) );
+}
+if ( ! taxonomy_exists( $tax ) ) {
+	register_taxonomy( $tax, "product", array( "hierarchical" => false, "public" => true ) );
+}
+foreach ( array( "Czerwony", "Zielony" ) as $t ) {
+	if ( ! term_exists( $t, $tax ) ) { wp_insert_term( $t, $tax ); }
+}
+$gv  = new WC_Product_Variable();
+$gv->set_name( "E2E Global Attr" );
+$gv->set_sku( "E2E-GA-001" );
+$gv->set_status( "publish" );
+$gid = $gv->save();
+wp_set_object_terms( $gid, array( "Czerwony", "Zielony" ), $tax );
+$ga = new WC_Product_Attribute();
+$ga->set_id( wc_attribute_taxonomy_id_by_name( "kolor" ) );
+$ga->set_name( $tax );
+$ga->set_options( wp_list_pluck( get_terms( array( "taxonomy" => $tax, "hide_empty" => false ) ), "term_id" ) );
+$ga->set_visible( true );
+$ga->set_variation( true );
+$gv->set_attributes( array( $ga ) );
+$gv->save();
+foreach ( array( "czerwony", "zielony" ) as $i => $slug ) {
+	$v = new WC_Product_Variation();
+	$v->set_parent_id( $gid );
+	$v->set_sku( "E2E-GA-001-" . $slug );
+	$v->set_attributes( array( $tax => $slug ) );
+	$v->set_regular_price( (string) ( 50 + $i * 10 ) );
+	$v->save();
+}
+WC_Product_Variable::sync( $gid );
+
+// Things the README says are NOT synced. e2e.sh asserts they really are not — an "unsupported"
+// list is only worth anything if something checks that it stays true.
+$u = new WC_Product_Simple();
+$u->set_name( "E2E Unsupported" );
+$u->set_sku( "E2E-UNSUP-001" );
+$u->set_regular_price( "42.00" );
+$u->set_status( "publish" );
+$u->set_upsell_ids( array( wc_get_product_id_by_sku( "E2E-S-002" ) ) );
+$u->set_cross_sell_ids( array( wc_get_product_id_by_sku( "E2E-S-003" ) ) );
+$uid = $u->save();
+wp_set_object_terms( $uid, array( "promocja" ), "product_tag" );
+update_post_meta( $uid, "_e2e_custom_field", "wartosc-123" );
+
 // --- Products the plugin MUST skip -------------------------------------------------------
 // Nothing asserted these before, so "the plugin skips drafts / no-SKU products" was folklore.
 // e2e.sh checks each of these is absent from the target.

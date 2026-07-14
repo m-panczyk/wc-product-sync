@@ -201,21 +201,33 @@ Przykładowe komunikaty:
 
 ## Ograniczenia
 
+> Sekcja zweryfikowana empirycznie na efemerycznym rigu (2026-07-14) — nie jest to lista życzeń.
+> Dwa wcześniejsze twierdzenia okazały się nieprawdziwe i zostały poprawione (dopasowanie po slug,
+> atrybuty na produktach prostych).
+
 ### Co jest wspierane
 - Produkty: `simple`, `variable`, `grouped`
-- Dopasowanie po SKU, następnie po `_wps_source_id`, potem po slug
-- Atrybuty globalne i lokalne
+- Dopasowanie po **SKU**, następnie po `_wps_source_id`, a na końcu po **nazwie** (`post_title`) —
+  i to tylko wtedy, gdy nazwa trafia w **dokładnie jeden** lokalny produkt, nieprzypisany do innego
+  źródła (`wc-product-sync.php:1984`)
+- **Atrybuty — tylko na produktach `variable`** (globalne `pa_*` i lokalne). Zweryfikowane: taksonomia
+  jest zakładana na celu, terminy i przypisania wariacji dojeżdżają poprawnie
 - Kategorie (tworzy brakujące)
-- Obrazy — tworzone i **aktualizowane** (inkrementalna mapa `_wps_image_map`: pobiera tylko nowe/zmienione, sprząta stare załączniki)
+- Obrazy — tworzone i **aktualizowane**, inkrementalnie (mapa `_wps_image_map`). Zweryfikowane:
+  podmiana głównego obrazu na źródle pobiera **tylko** ten jeden plik, galeria zostaje nietknięta,
+  a stary załącznik jest usuwany
 - Dostępności magazynowe (`manage_stock`, `stock_quantity`, `stock_status`)
 - Wagi i wymiary
+- Ceny zwykłe i **promocyjne** (`sale_price`), opisy (pełny i krótki)
 
 ### Czego NIE jest wspierane
-- Produkty powiązane (upsells/cross-sells)
-- Meta dane custom fields poza `_wps_*`
-- Tagi produktowe (poza `wps-usuniete`)
-- Warianty cen w ramach wariacji — ceny są synchronizowane, ale nie wszystkie pola WC
-- Zmiana typu produktu z powrotem na istniejący (może tworzyć duplikaty)
+- **Atrybuty na produktach `simple` i `grouped`** — `set_attributes()` jest wołane wyłącznie w gałęzi
+  `WC_Product_Variable` (`wc-product-sync.php:2095`, `:2162`). Produkt prosty z atrybutem na źródle
+  przyjedzie na cel **bez żadnego atrybutu**, i **nie jest to zgłaszane jako błąd**
+- Produkty powiązane (upsells/cross-sells) — zweryfikowane: nie są przenoszone
+- Meta dane custom fields poza `_wps_*` — zweryfikowane: nie są przenoszone
+- Tagi produktowe (poza `wps-usuniete`) — zweryfikowane: nie są przenoszone
+- Zmiana typu produktu na źródle (np. `simple` → `variable`) — może utworzyć duplikat
 
 ---
 

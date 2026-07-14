@@ -127,12 +127,50 @@ assert_status_filter() {
 	'
 }
 
+# The README's "not supported" list, asserted. A list of things that don't sync is worth nothing
+# unless something checks it stays true — and the supported list had two false claims in it until
+# they were checked against a real store.
+assert_unsupported_not_synced() {
+	echo "==> Asserting the documented NON-features really do not sync"
+	twp eval '
+	$fail = 0;
+	$p = wc_get_product( wc_get_product_id_by_sku( "E2E-UNSUP-001" ) );
+	if ( ! $p ) { echo "  FAIL: E2E-UNSUP-001 did not sync at all — fixture broken\n"; exit( 1 ); }
+	$tags = wp_get_post_terms( $p->get_id(), "product_tag", array( "fields" => "slugs" ) );
+	if ( $tags )                                                 { echo "  FAIL: product tags were synced (" . implode( ",", $tags ) . ")\n"; $fail = 1; }
+	if ( $p->get_upsell_ids() )                                  { echo "  FAIL: upsells were synced\n"; $fail = 1; }
+	if ( $p->get_cross_sell_ids() )                              { echo "  FAIL: cross-sells were synced\n"; $fail = 1; }
+	if ( get_post_meta( $p->get_id(), "_e2e_custom_field", true ) ) { echo "  FAIL: custom meta was synced\n"; $fail = 1; }
+	if ( ! $fail ) { echo "  PASS: tags, upsells, cross-sells and custom meta correctly NOT synced\n"; }
+	exit( $fail );
+	'
+}
+
+# Global attributes (pa_*) work — but only on variable products. Both halves of that sentence are
+# load-bearing: the README claimed attributes worked generally, and on a simple product they are
+# silently dropped with no error at all.
+assert_global_attributes() {
+	echo "==> Asserting global attributes reach the target (variable products)"
+	twp eval '
+	if ( ! taxonomy_exists( "pa_kolor" ) ) { echo "  FAIL: taxonomy pa_kolor was not created on the target\n"; exit( 1 ); }
+	$p = wc_get_product( wc_get_product_id_by_sku( "E2E-GA-001" ) );
+	if ( ! $p ) { echo "  FAIL: E2E-GA-001 did not sync\n"; exit( 1 ); }
+	$found = false;
+	foreach ( $p->get_attributes() as $k => $a ) {
+		if ( "pa_kolor" === $k && $a->is_taxonomy() && count( $a->get_options() ) >= 2 ) { $found = true; }
+	}
+	if ( ! $found ) { echo "  FAIL: pa_kolor is missing or not a taxonomy attribute on the target\n"; exit( 1 ); }
+	if ( count( $p->get_children() ) < 2 ) { echo "  FAIL: variations of the global-attribute product did not sync\n"; exit( 1 ); }
+	echo "  PASS: pa_kolor taxonomy, terms and variation assignments all synced\n";
+	'
+}
+
 # The sync must not merely finish — it must finish without errors.
 #
-# WARNING is in the pattern deliberately. Image sideload failures used to log at 'warning'
-# and leave błędy=0, so a run that silently stripped images off products looked perfectly
-# green here. Anything the plugin considers worth warning about is worth failing a test over;
-# if a benign warning ever shows up, whitelist that specific one rather than widening this.
+# WARNING is in the pattern deliberately. Image sideload failures used to log at 'warning' and
+# leave błędy=0, so a run that silently stripped images off products looked perfectly green here.
+# Anything the plugin considers worth warning about is worth failing a test over; if a benign
+# warning ever shows up, whitelist that specific one rather than widening this.
 assert_no_errors() {
 	echo "==> Asserting the sync logged no errors or warnings"
 	twp eval '
@@ -238,6 +276,8 @@ if [ "$BATCHES" -lt 2 ]; then
 fi
 compare "full sync, $BATCHES batches"
 assert_status_filter
+assert_global_attributes
+assert_unsupported_not_synced
 assert_no_errors
 
 echo "==> Phase 2: force-full deletion across batches"
