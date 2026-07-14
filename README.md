@@ -1,6 +1,13 @@
 # WC Product Sync (SKU)
 
-Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (**źródło**) do TEGO sklepu (**cel**). Dopasowanie po SKU. Obsługa: `simple`, `variable`, `grouped`. Zapisy lokalnie przez WooCommerce CRUD.
+Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (**źródło**) do TEGO sklepu
+(**cel**). Dopasowanie po **SKU**, a gdy go brak — po `_wps_source_id`, następnie po nazwie. Obsługa:
+`simple`, `variable`, `grouped`. Zapisy lokalnie przez WooCommerce CRUD; na źródle wtyczka **niczego
+nie zmienia** (same odczyty REST).
+
+**[Instalacja](#instalacja)** · **[Diagnostyka (wiki)](https://git.panczyk.cc/mpanczyk/wc-product-sync/wiki)** · **[Zmiany](CHANGELOG.md)** · **[Dla deweloperów](DEVELOPMENT.md)**
+
+---
 
 ---
 
@@ -19,8 +26,8 @@ ręcznego rozpakowywania.
 https://git.panczyk.cc/mpanczyk/wc-product-sync/releases
 ```
 
-Repozytorium jest **prywatne**, więc pobranie wymaga zalogowania lub tokenu. Alternatywnie zbuduj
-paczkę samodzielnie ze źródeł — patrz „Budowanie paczki" niżej:
+Repozytorium jest **publiczne** — ZIP pobierzesz bez logowania i bez tokenu. Możesz też zbudować
+paczkę sam ze źródeł (patrz [DEVELOPMENT.md](DEVELOPMENT.md)):
 
 ```bash
 ./build.sh          # → dist/wc-product-sync-<wersja>.zip
@@ -32,14 +39,14 @@ paczkę samodzielnie ze źródeł — patrz „Budowanie paczki" niżej:
 Przez wp-cli (to samo, bez klikania):
 
 ```bash
-wp plugin install ./wc-product-sync-0.9.22.zip --activate
+wp plugin install ./wc-product-sync-<wersja>.zip --activate
 ```
 
 Ręcznie przez SSH — rozpakuj tak, aby plik `wc-product-sync.php` wylądował
 w `wp-content/plugins/wc-product-sync/`:
 
 ```bash
-unzip wc-product-sync-0.9.22.zip -d wp-content/plugins/
+unzip wc-product-sync-<wersja>.zip -d wp-content/plugins/
 ```
 
 **3. Skonfiguruj** — URL źródła i Consumer Key/Secret w menu **WooCommerce → Synchronizacja
@@ -48,9 +55,11 @@ produktów** (albo stałymi w `wp-config.php` — patrz niżej, metoda zalecana)
 **4. Uruchom Symulację (dry run)** — pokaże co zostanie zmienione, bez zapisu do bazy. Zawsze zaczynaj
 od tego.
 
-**Aktualizacja do nowszej wersji:** nie musisz powtarzać tej procedury — po jednorazowym ustawieniu
-stałej `WC_PRODUCT_SYNC_UPDATE_URL` nowe wersje przychodzą przez **Wtyczki → Aktualizuj** jednym
-kliknięciem. Patrz „Aktualizacje z własnego serwera".
+**Aktualizacja do nowszej wersji:** nie musisz powtarzać tej procedury. Od **0.9.25** wtyczka ma
+wbudowany publiczny kanał wydań, więc nowe wersje przychodzą przez **Wtyczki → Aktualizuj** jednym
+kliknięciem — **bez żadnej konfiguracji**. Patrz „Aktualizacje".
+
+---
 
 ---
 
@@ -72,6 +81,8 @@ Gdy stałe są zdefiniowane, pola w formularzu stają się nieaktywne i **nie na
 
 ---
 
+---
+
 ## Synchronizacja produktów
 
 ### Tryb synchronizacji (domyślnie)
@@ -87,6 +98,8 @@ add_filter( 'wps_sync_statuses', function( $statuses ) {
     return $statuses;
 } );
 ```
+
+---
 
 ---
 
@@ -111,6 +124,8 @@ Niezależna od `deletion_mode` opcja **„Trwale usuń lokalne produkty nieobecn
 
 ---
 
+---
+
 ## Harmonogram
 
 ### WP-Cron (domyślne)
@@ -125,6 +140,8 @@ Jeśli masz wyłączony WP-Cron, dodaj do crontaba użytkownika www:
 # Uruchamiaj co godzinę (zalecany interwał — wystarczy by "daily" się aktywował)
 0 * * * * curl -s https://twoj-sklep.pl/wp-cron.php?doing_wp_cron >/dev/null 2>&1
 ```
+
+---
 
 ---
 
@@ -147,6 +164,8 @@ siebie na celu.
 
 ---
 
+---
+
 ## Wydajność i wsadowanie
 
 Synchronizacja jest **wsadowa z wznawianiem**, więc duże katalogi nie giną na limicie czasu PHP:
@@ -163,12 +182,16 @@ zmienione obrazy. Szczegółowe czasy i strojenie: **[`docs/PERFORMANCE.md`](doc
 
 ---
 
+---
+
 ## Synchronizacja ręczna
 
 W menu **WooCommerce → Synchronizacja produktów**:
 
 - **Symulacja (dry run)** — pokaże co zostanie zmienione, bez zapisu do bazy. Logi w WooCommerce → Status → Logi (źródło: `wc-product-sync`).
 - **Synchronizuj teraz** — uruchamia synchronizację natychmiast.
+
+---
 
 ---
 
@@ -182,20 +205,6 @@ Plugin blokuje równoczesne uruchomienia synchronizacji:
   kontynuuje działanie nawet jeśli użytkownik zamknie przeglądarkę.
 
 ---
-
-## Logi
-
-Wszystkie operacje są logowane w WooCommerce:
-
-1. Wejdź do **WooCommerce → Status → Logi**.
-2. Wybierz źródło `wc-product-sync`.
-3. Szukaj tagów: `info` (normalne), `warning` (ostrzeżenia), `error` (błędy).
-
-Przykładowe komunikaty:
-- `[DRY] CREATE simple: ...` — dry run, produkt zostanie utworzony
-- `[DRY] UPDATE variable: ...` — dry run, produkt zostanie zaktualizowany
-- `Soft-delete → draft: ...` — produkt zdraftowany bo brak w źródle
-- `Błąd pobierania strony 5: ...` — problem z API źródła
 
 ---
 
@@ -222,6 +231,8 @@ co wcześniej **przerywało każdy przebieg**. Endpoint został wyłącznie jako
 (sięgany maks. raz na przebieg), gdyby payload nie zawierał ani nazwy, ani sluga atrybutu.
 
 **Ruch do serwera aktualizacji** (`update.json` + ZIP) **nie idzie do źródła** — patrz „Aktualizacje".
+
+---
 
 ---
 
@@ -257,481 +268,86 @@ co wcześniej **przerywało każdy przebieg**. Endpoint został wyłącznie jako
 
 ---
 
-## Rozwiązywanie problemów
-
-### Produkt się nie synchronizuje
-1. Sprawdź logi (`wc-product-sync`) czy nie ma błędów API.
-2. Produkty **bez SKU** są dopasowywane po nazwie (fallback), więc brak SKU sam w sobie nie blokuje synchronizacji — ale utrudnia dopasowanie przy zmianie nazwy. Ustaw SKU, jeśli możesz.
-3. Sprawdzaj statusy w adminie produktu — może być `draft` jeśli został soft-deleted.
-
-### Duplicate products
-Upewnij się że każdy produkt na źródle ma unikalne SKU. Jeśli grouped product nie ma SKU, plugin próbuje dopasować po `_wps_source_id` (meta), którą zapisuje przy pierwszym sync.
-
-### Błąd "Synchronizacja już trwa"
-Sync jest wciąż aktywny lub został przerwany i blokada nie zwolniła się (TTL 15 minut). Poczekaj lub usuń transient `wps_sync_running` z bazy danych:
-
-```sql
-DELETE FROM wp_options WHERE option_name = 'transient_wps_sync_running' OR option_name LIKE 'transient_timeout_wps_sync_running%';
-```
-
-### Sync przerywa się na „Nie pobrano definicji atrybutów globalnych"
-
-Klucz działa na `/products`, ale **nie** na `/products/attributes`. To nie jest ten sam problem:
-WooCommerce pilnuje tych endpointów **różnymi uprawnieniami**.
-
-| Endpoint | Wymagane uprawnienie | Kto ma |
-|---|---|---|
-| `/wp-json/wc/v3/products` | `read_private_products` | Administrator, Kierownik sklepu |
-| `/wp-json/wc/v3/products/attributes` | **`manage_product_terms`** | Administrator, Kierownik sklepu |
-
-Rola z ograniczonymi uprawnieniami (albo klucz przypisany do użytkownika o zawężonej roli) potrafi
-**listować produkty i jednocześnie nie widzieć atrybutów**. Sprawdź to wprost:
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' -u "ck_xxx:cs_xxx" \
-  "https://zrodlo.pl/wp-json/wc/v3/products/attributes"
-```
-
-**Dlaczego wtyczka przerywa cały przebieg, a nie tylko pomija atrybuty:** bez mapy atrybutów
-globalnych produkty `variable` zostałyby przebudowane **bez żadnych atrybutów** — czyli po cichu
-wyczyszczone. Lepiej nie zrobić nic i ponowić, niż zniszczyć dane.
-
-**Naprawa:** wygeneruj klucz na koncie **Administratora** lub **Kierownika sklepu** (uprawnienie
-klucza: Odczyt).
-
-### Produkty `variable` bez SKU — czy się zduplikują?
-
-**Nie.** Zweryfikowane na rigu (2026-07-14), trzy kolejne przebiegi + zmiana nazwy na źródle:
-
-- **Rodzic** (`variable`) dopasowywany jest po **SKU → `_wps_source_id` → nazwie**. Po **pierwszym**
-  syncu dostaje `_wps_source_id`, więc dalej wiąże się po **ID źródła** — zmiana nazwy na źródle
-  aktualizuje produkt zamiast tworzyć duplikat.
-- **Wariacje** dopasowywane są po **SKU**, a gdy go nie ma — po **sygnaturze atrybutów** (kombinacji
-  wartości, np. `pa_kolor=czerwony`). Wariacja bez SKU też się nie duplikuje.
-
-**Jedyne realne ryzyko jest przy pierwszym syncu**, zanim powstanie `_wps_source_id`: jedynym uchwytem
-jest wtedy nazwa, a fallback zadziała tylko gdy trafi w **dokładnie jeden** lokalny produkt
-nieprzypisany do innego źródła. Na pustym celu nie ma problemu — produkty po prostu powstaną.
-
-### Klucz API nie działa
-Sprawdź w WooCommerce → Ustawienia → Zaawansowane → REST API czy Consumer Key i Consumer Secret są prawidłowe oraz mają uprawnienia "Read/Write" do produktów.
-
 ---
 
-## Aktualizacje z własnego serwera
+## Aktualizacje
 
-Nowe wersje pojawiają się w **Wtyczki → Aktualizuj** (jak wtyczki z wordpress.org), aktualizacja
-jednym kliknięciem — bez ponownego wgrywania ZIP-a.
+Nowe wersje pojawiają się w **Wtyczki → Aktualizuj**, aktualizacja jednym kliknięciem — bez ponownego
+wgrywania ZIP-a.
 
-**Działa domyślnie, bez żadnej konfiguracji.** Od 0.9.25 wtyczka ma wbudowany adres publicznego
-kanału wydań (`DEFAULT_UPDATE_URL`), a repozytorium jest publiczne — więc **nie trzeba ani stałej, ani
-tokenu**. Świeża instalacja po prostu dostaje aktualizacje.
+**Działa domyślnie, bez żadnej konfiguracji.** Od 0.9.25 wtyczka ma wbudowany adres publicznego kanału
+wydań, a repozytorium jest publiczne — nie potrzeba ani stałej, ani tokenu.
 
-**Uwaga dla instalacji ≤ 0.9.24:** starsze wersje nie znają domyślnego adresu, więc same się nie
-zaktualizują. Trzeba **raz** wgrać 0.9.25 ręcznie (albo dodać stałą poniżej) — od tego momentu updater
-działa sam.
-
-**Własny serwer aktualizacji** — nadpisz stałą:
+**Instalacje ≤ 0.9.24 nie znają wbudowanego adresu**, więc same się nie zaktualizują. Trzeba **raz**
+wgrać nowszą wersję ręcznie; potem updater działa sam.
 
 ```php
+// własny serwer aktualizacji
 define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://twoj-serwer.pl/wc-product-sync/update.json' );
-```
 
-**Wyłączenie updatera** (żadnych zapytań HTTP) — pusta wartość:
+// prywatne repozytorium (Forgejo/Gitea) — token dołączany TYLKO do żądań na host z UPDATE_URL
+define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxx' );
 
-```php
+// całkowite wyłączenie updatera — zero zapytań HTTP
 define( 'WC_PRODUCT_SYNC_UPDATE_URL', '' );
 ```
 
-**Prywatne repozytorium (Forgejo/Gitea)** — jeśli `update.json` i ZIP są za autoryzacją, dodaj token dostępu (uprawnienie do odczytu repozytorium):
+Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd serwera), więc niedostępny serwer nigdy nie
+spowalnia panelu. Wymuszenie sprawdzenia: `wp transient delete wps_update_info`.
 
-```php
-define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' );
-```
-
-Token jest dołączany jako nagłówek `Authorization: token …` **wyłącznie** do żądań na host z `UPDATE_URL` — zarówno do pobrania `update.json`, jak i samego ZIP-a (który ściąga rdzeń WordPressa). Dzięki ograniczeniu do jednego hosta token nigdy nie trafia do innego serwera.
-
-**Hosting** — pod `UPDATE_URL` serwujemy `update.json`, którego `download_url` wskazuje wersjonowanego ZIP-a:
-
-```json
-{
-  "version": "0.9.22",
-  "requires": "6.0",
-  "requires_php": "7.4",
-  "tested": "6.7",
-  "download_url": "https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/v0.9.22/wc-product-sync-0.9.22.zip",
-  "sections": { "changelog": "…" }
-}
-```
-
-### Dlaczego wydanie `latest`
-
-`UPDATE_URL` to **stała w `wp-config.php`** — ustawiana raz i nigdy nie zmieniana. Nie może więc
-wskazywać na adres przypięty do wersji: sklep skonfigurowany na
-`…/releases/download/v0.9.22/update.json` **na zawsze zostałby na 0.9.22** i nigdy nie zobaczyłby
-0.9.23. Metadane muszą leżeć pod adresem, który się nie zmienia, a treść pod nim ma się zmieniać.
-
-Dlatego obok wydań wersjonowanych (`v0.9.22`, `v0.9.23`, …) utrzymujemy **jedno ruchome wydanie
-z tagiem dosłownie `latest`**, do którego przy każdej publikacji podmieniamy `update.json`. Adres jest
-stały, bo tag się nie zmienia:
-
-```
-https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/latest/update.json
-```
-
-Same ZIP-y zostają **niezmienne** pod swoimi tagami wersyjnymi — `latest` niesie tylko metadane,
-a `download_url` w środku pokazuje na wersjonowanego ZIP-a. Dzięki temu instalacja 0.9.22 pobiera
-dokładnie tę paczkę, którą wtedy zbudowano, nawet długo po wydaniu 0.9.23.
-
-Konfiguracja na sklepie docelowym:
-
-```php
-define( 'WC_PRODUCT_SYNC_UPDATE_URL',   'https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/latest/update.json' );
-define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' );
-```
-
-### Kanały wydań: `latest` (stable) i `latest-beta`
-
-Kanał **wynika z wersji** — nie podaje się go ręcznie, więc beta nie trafi na produkcję przez pomyłkę:
-
-| Wersja w nagłówku | Tag | Publikowane do |
-|---|---|---|
-| `0.9.24-beta1` | `v0.9.24-beta1` | **`latest-beta`** (sklepy produkcyjne tego nie widzą) |
-| `0.9.24` | `v0.9.24` | **`latest` + `latest-beta`** |
-
-Wydanie finalne trafia do **obu** kanałów celowo: kanał beta jest **nadzbiorem** stabilnego. Gdyby
-finał szedł tylko na `latest`, sklep testowy zostałby na `0.9.24-beta1` na zawsze i nigdy nie dostałby
-`0.9.24`, która ją zastępuje.
-
-Działa to, bo PHP-owe `version_compare` porządkuje `0.9.24-beta1 < 0.9.24` (a `0.9.22 < 0.9.24-beta1`)
-— beta nigdy nie wygląda na nowszą od finału, który po niej następuje.
-
-**Sklep testowy** wskazujesz na kanał beta jedną stałą:
-
-```php
-define( 'WC_PRODUCT_SYNC_UPDATE_URL', 'https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/latest-beta/update.json' );
-```
-
-Wydania beta robisz z gałęzi roboczej (np. `next`) — `release.yaml` reaguje na **tag `v*`**, niezależnie
-od gałęzi:
-
-```bash
-# na gałęzi next, z Version: 0.9.24-beta1 w nagłówku wtyczki
-git tag v0.9.24-beta1 && git push forgejo v0.9.24-beta1
-```
+Jak działają kanały wydań i dlaczego tag `latest` jest ruchomy — patrz [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ---
 
-## Budowanie paczki
+## Coś nie działa
 
-`build.sh` czyta wersję z nagłówka wtyczki (**jedyne źródło prawdy**) i składa dwa artefakty w `dist/`:
+Pełna diagnostyka jest w **[wiki](https://git.panczyk.cc/mpanczyk/wc-product-sync/wiki)** — z drzewem
+objawów („co widzisz?" → właściwa strona), po polsku i angielsku. Nie powielamy jej tutaj, żeby obie
+wersje nie rozjechały się przy pierwszej poprawce.
 
-| Artefakt | Zawartość |
-|---|---|
-| `wc-product-sync-<wersja>.zip` | `wc-product-sync.php`, `README.md`, `LICENSE`, `docs/` — pod jednym folderem `wc-product-sync/` |
-| `update.json` | metadane dla updatera; `download_url` = `$WPS_UPDATE_BASE_URL/wc-product-sync-<wersja>.zip` |
+Skrót na start:
 
-Wewnętrzne artefakty (`tests/`, `metrics/`, notatki robocze, `build.sh`) **nie trafiają** do paczki.
+1. **Wersja** — `wp plugin get wc-product-sync --field=version`. Sporo problemów jest już naprawionych.
+2. **Log** — WooCommerce → Status → Logi, źródło `wc-product-sync`. Szukaj linii `ERROR`.
+3. **Test połączenia ze źródłem** — [Wiki: Pierwsze 5 minut](https://git.panczyk.cc/mpanczyk/wc-product-sync/wiki/PL-Pierwsze-kroki).
 
-`WPS_UPDATE_BASE_URL` musi wskazywać katalog, z którego realnie serwowany będzie ZIP — czyli ścieżkę
-pobierania **wydania wersjonowanego**:
-
-```bash
-WPS_UPDATE_BASE_URL=https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/v0.9.23 ./build.sh
-```
-
-Bez tej zmiennej `download_url` wskaże `https://EXAMPLE.invalid/…` — paczka zbuduje się, ale updater
-nie będzie działał.
-
-### Publikacja nowej wersji
-
-Publikacja jest zautomatyzowana — **wydanie robi tag**:
-
-1. **Podnieś `Version`** w nagłówku `wc-product-sync.php` i dopisz wpis do „Zmiany (Changelog)".
-2. **Otaguj i wypchnij:**
-
-```bash
-git tag v0.9.23 && git push forgejo v0.9.23
-```
-
-Tag `v*` uruchamia workflow **Release** (`.forgejo/workflows/release.yaml`), który woła `publish.sh`:
-buduje ZIP-a, tworzy wydanie `v0.9.23` z załącznikiem, a na koniec **podmienia `update.json`
-w wydaniu `latest`** — to ten ostatni krok faktycznie publikuje aktualizację dla sklepów.
-
-`publish.sh` **odmawia publikacji, gdy tag nie zgadza się z wersją w nagłówku wtyczki** (`v0.9.23` ↔
-`Version: 0.9.23`) — literówka w bumpie wywala się na CI, zamiast wypchnąć metadane wskazujące na złą
-paczkę.
-
-To samo ręcznie (gdy runner nie działa):
-
-```bash
-FORGEJO_TOKEN=xxx ./publish.sh v0.9.23
-```
-
-Metadane są cache'owane po stronie sklepu **12 h** (sukces) / **2 h** (błąd serwera), więc nowa wersja
-pojawi się w panelu w ciągu doby, a niedostępny serwer nigdy nie spowalnia panelu. Cache jest
-czyszczony automatycznie po każdej aktualizacji wtyczki (`upgrader_process_complete`). Żeby wymusić
-sprawdzenie od razu, usuń transient:
-
-```bash
-wp transient delete wps_update_info
-```
+Najczęstsze przyczyny (opisane w [Wiki: Klucze API](https://git.panczyk.cc/mpanczyk/wc-product-sync/wiki/PL-Klucze-API)):
+źródło pod `http://` (WooCommerce przyjmuje klucze API **tylko po HTTPS**), klucz przypisany do
+użytkownika bez uprawnień do produktów, albo klucz z **innego** sklepu.
 
 ---
 
 ## Deinstalacja
 
-**Najważniejsze: usunięcie wtyczki NIE usuwa produktów.** Zsynchronizowany katalog zostaje w sklepie
-— wtyczka kasuje po sobie tylko własne ustawienia i harmonogram.
-
-### 1. Dezaktywacja (odwracalna, nic nie ginie)
-
-**Wtyczki → Zainstalowane → Wyłącz**, albo:
-
-```bash
-wp plugin deactivate wc-product-sync
-```
-
-Zatrzymuje harmonogram (`wc_product_sync_daily_event`, `wc_product_sync_fast_event`). Ustawienia,
-klucze API, produkty i wszystkie metadane **zostają**. Ponowne włączenie wraca do stanu sprzed.
-
-### 2. Usunięcie (uninstall)
-
-**Wtyczki → Usuń**, albo:
+**Usunięcie wtyczki NIE usuwa produktów.** Znikają wyłącznie ustawienia wtyczki, jej zdarzenia cron
+i transienty. Produkty, obrazy, meta (`_wps_synced`, `_wps_source_id`, `_wps_image_map`) oraz tag
+`wps-usuniete` **zostają** — bez nich ponowna instalacja nie dopasowałaby produktów po
+`_wps_source_id` i **zduplikowała katalog**.
 
 ```bash
 wp plugin uninstall wc-product-sync --deactivate
 ```
 
-| Znika | Zostaje |
-|---|---|
-| Ustawienia (`wc_product_sync_options`) — w tym URL źródła i klucze API | **Wszystkie produkty i wariacje** |
-| Wynik i raport ostatniego przebiegu (`wps_last_sync_result`, `wps_last_sync_report`) | **Obrazy produktów** (załączniki) |
-| Zdarzenia cron: `wc_product_sync_daily_event`, `wps_sync_resume`, `wc_product_sync_fast_event` | Meta: `_wps_synced`, `_wps_source_id`, `_wps_image_map`, `_wps_soft_deleted_at` |
-| Transienty: blokada, postęp, klucze źródła, cache updatera | Tag `Usunięte (sync)` (`wps-usuniete`) i szkice po soft-delete |
-
-**Dlaczego metadane zostają — to jest celowe.** Gdyby uninstall je skasował, zniknęłoby wszystko, co
-wiąże lokalne produkty ze źródłem. Po ponownej instalacji wtyczka nie dopasowałaby ich po
-`_wps_source_id` (dotyczy zwłaszcza produktów bez SKU i grouped) i **zduplikowałaby katalog** zamiast
-go zaktualizować. Usunięcie wtyczki nie może niszczyć danych, na których sklep dalej stoi.
-
-Zachowanie jest pokryte testem (`tests/stack/uninstall.sh`): sprawdza, że wszystkie opcje, crony
-i transienty **znikają**, a produkty, załączniki, meta, tag i szkice **przeżywają**.
-
-### 3. Pełne wyczyszczenie śladów (opcjonalne, nieodwracalne)
-
-Tylko jeśli **na pewno** nie wrócisz do tej wtyczki. Uruchom **po** uninstallu:
-
-```bash
-wp eval '
-global $wpdb;
-$n = $wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_key IN (\"_wps_synced\",\"_wps_source_id\",\"_wps_image_map\",\"_wps_soft_deleted_at\")" );
-echo "usunięto $n wierszy meta\n";
-$t = term_exists( "wps-usuniete", "product_tag" );
-if ( $t ) { wp_delete_term( (int) $t["term_id"], "product_tag" ); echo "usunięto tag wps-usuniete\n"; }
-'
-rm -f wp-content/uploads/wc-logs/wc-product-sync-*.log
-```
-
-**Czego to nie robi:** nie usuwa produktów ani obrazów — te zostają w sklepie jak każdy inny towar.
-Jeśli chcesz się ich pozbyć, kasuj je normalnie w WooCommerce.
-
-**Konsekwencja, jeśli jednak wrócisz do wtyczki:** produkty z SKU i tak zostaną dopasowane (SKU jest
-pierwszym kryterium), ale produkty **bez SKU** i grouped bez SKU zduplikują się, bo przepadło
-`_wps_source_id`. Do tego pierwszy sync po wyczyszczeniu **pobierze wszystkie obrazy od nowa** —
-mapa `_wps_image_map` już nie istnieje.
+Pełna instrukcja (pułapka `rm -rf`, „nie udało się odinstalować", pełne wyczyszczenie śladów):
+**[Wiki: Deinstalacja](https://git.panczyk.cc/mpanczyk/wc-product-sync/wiki/PL-Deinstalacja)**.
 
 ---
 
-Pełna lista zmian (wersje 0.3.0–0.9.27) znajduje się w [CHANGELOG.md](CHANGELOG.md).
+## Zmiany
+
+Pełna lista zmian (0.3.0–0.9.27): **[CHANGELOG.md](CHANGELOG.md)**.
+
+---
+
+## Dla deweloperów
+
+Budowanie paczki, publikacja wydań, CI/CD, efemeryczny rig e2e i testy wydajności:
+**[DEVELOPMENT.md](DEVELOPMENT.md)**.
+
+---
 
 ## Support
 
 Wtyczka jest rozwijana wewnętrznie. W przypadku problemów zaloguj się na **sklep docelowy** i sprawdź logi WooCommerce (`wc-product-sync`). Jeśli problem dotyczy API źródła (błędy 401/403/500), sprawdzaj konfigurację REST API na stronie źródłowej.
 
 ---
-
-## Testing
-
-### CI/CD (Forgejo Actions)
-
-Workflows żyją w **`.forgejo/workflows/`** (jedyny katalog — Forgejo czyta właśnie ten):
-
-| Workflow | Wyzwalacz | Co robi |
-|---|---|---|
-| `ci.yaml` | push do `main`, PR | `php -l`, `bash -n`, **próbne zbudowanie paczki** (`./build.sh`). |
-| `e2e.yaml` | push do `main`, PR | Efemeryczne sklepy: parytet + force-full + **wydajność A/B**. |
-| `release.yaml` | tag `v*` | `publish.sh` — buduje ZIP, tworzy wydanie, podmienia `update.json` w kanale. |
-
-**CI nie dotyka rigu LAN i nie ma żadnych sekretów.** Testy stawiają własne sklepy WooCommerce
-w kontenerach obok joba (ten sam demon DinD) i kasują je po sobie. Żadnego klucza SSH, żadnego
-dostępu do produkcji, żadnych mutacji na cudzych danych.
-
-Skrypty rigowe (`tests/perf-run.sh`, `tests/sync-parity-test.sh`, `tests/systemd/`) zostają jako
-**narzędzia ręczne** do pomiarów na realnym sprzęcie — nie są już częścią CI.
-
-**Wymagania runnera:** joby lecą w obrazie `node:22-bookworm` (etykieta `self-hosted`), a brakujące
-narzędzia doinstalowuje krok `Toolchain`. Runner musi mieć dostęp do demona DinD — job wykrywa go
-sam na swoim domyślnym gateway'u.
-
-### Efemeryczny rig e2e (`tests/stack/`)
-
-Dwa pełne sklepy WooCommerce (źródło + cel) w Dockerze, na jednej sieci. **Nie wymaga rigu LAN,
-SSH ani sekretów** — działa tak samo na laptopie i w CI, i niczego nie mutuje poza sobą.
-
-```bash
-tests/stack/up.sh      # build ZIP-a → 2 sklepy → WP+WC → klucze REST → instalacja wtyczki z ZIP-a
-tests/stack/seed.sh    # deterministyczny katalog (stały seed → powtarzalne błędy)
-tests/stack/e2e.sh     # pełny sync + parytet + force-full
-tests/stack/perf.sh    # wydajność: A/B względem ostatniego tagu
-tests/stack/down.sh    # kasuje wszystko razem z wolumenami
-```
-
-Cel instaluje wtyczkę **z paczki zbudowanej przez `build.sh`**, więc testowany jest realny artefakt
-dystrybucyjny, a nie drzewo robocze.
-
-**`e2e.sh` wymusza wielobatchowość** (`per_page=10`, `sync_batch_limit=15`) i **traktuje pojedynczy
-batch jako błąd**. To nie jest kaprys: błąd z 0.9.20 ujawniał się **wyłącznie** przy batchach
-wznowienia — dla katalogu mieszczącego się w jednym batchu force-full kasował właśnie
-zsynchronizowane produkty, a dla dzielonego nie uruchamiał się wcale. Test jednobatchowy nie
-sprawdziłby żadnego z tych przypadków.
-
-Faza 2 usuwa kilka produktów ze źródła, włącza `force_full_sync` i sprawdza, że z celu zniknęły
-**dokładnie te** produkty — reszta katalogu przeżyła.
-
-### Wydajność: pomiar A/B (`tests/stack/perf.sh`)
-
-Bezwzględny czas synchronizacji zmierzony w kontenerze na współdzielonym NAS-ie (DinD, sterownik
-`vfs`) jest **bezwartościowy** — ten sam kod potrafi się wahać dwukrotnie między przebiegami. Dlatego
-`perf.sh` nigdy nie mówi „sync trwa N sekund". Synchronizuje **ten sam** zaseedowany katalog dwa razy,
-na tym samym sprzęcie w tej samej minucie: raz wtyczką z **ostatniego tagu** (`v[0-9]*`), raz z drzewa
-roboczego. Szum środowiskowy uderza w obie strony jednakowo, więc **stosunek** jest stabilny, choć
-liczby bezwzględne nie są.
-
-- **Rozgrzewka** (odrzucana) — pierwszy sync płaci za opcache, bufory MySQL i pobranie obrazków;
-  bez niej strona idąca druga wygrywałaby bez powodu.
-- **Przeplot i best-of-2** — przy **identycznym kodzie** po obu stronach ten stelaż potrafił pokazać
-  **1.14×**; to jest podłoga szumu. Przeplot kasuje dryf, a `min` odrzuca chwilowe zacięcia (sąsiedni
-  kontener, flush ZFS-a) zamiast brać je za wynik. Po tej zmianie identyczny kod daje ~0.98×.
-- **Progi:** `WPS_PERF_WARN` (domyślnie 1.2×) → ostrzeżenie, `WPS_PERF_MAX` (1.5×) → błąd.
-
-Łapie to regresje **kodu** (dodatkowy round-trip REST na produkt, obrazki pobierane mimo mapy,
-rollup odpalany przy no-op update). **Nie** odpowie na pytanie „ile trwa pełny sync na realnym
-QNAP-ie" — to własność sprzętu, nie kodu; od tego są ręczne skrypty rigowe.
-
-**Ograniczenia rigu (tylko na źródle, produkcji nie dotyczą):** WooCommerce przyjmuje Basic auth
-kluczem CK/CS **tylko gdy `is_ssl()`**; stack jest po czystym HTTP, więc `wp-config` ustawia
-`$_SERVER['HTTPS'] = 'on'`. To z kolei sprawia, że WP zaczyna podawać adresy obrazków po `https://`,
-których cel nie pobierze — dlatego mu-plugin (`tests/stack/mu/`) wymusza z powrotem `http`. Produkcja
-działa po prawdziwym TLS i nie potrzebuje żadnego z tych obejść.
-
-### Smoke test (plugin loading)
-
-Weryfikuje, że wtyczka ładuje się bez fatalnych błędów, singleton działa, cron jest zarejestrowany i stałe klasy są dostępne.
-
-```bash
-# Na rigu (QNAP target):
-WP_SMOKE_RUN=1 wp eval 'include "/share/.../wp-content/plugins/wc-product-sync/tests/smoke-test.php";'
-```
-
-Zwraca exit 0 przy sukcesie, 1 przy dowolnej awarii. Przydatny jako first-line check przed deployem nowej wersji na rig.
-
-### Field-parity integrity test (`tests/sync-parity-test.sh`)
-
-Testuje cykl: mutuj produkt na źródle → szybki sync na celu → weryfikacja parytetu wszystkich prostych produktów źródło↔cel.
-
-**Tryby:**
-- **`tick`** (domyślny): mutuje $K losowych prostych produktów na źródle, uruchamia fast-sync na celu, sprawdza czy pole (`price` lub `stock`) się zgadza
-- **`full`**: uruchamia pełny sync, następnie weryfikuje parytet całego katalogu + rollup cen wariacji + tagi soft-delete
-
-**Uruchomienie:**
-```bash
-# Cena (default), tryb tick (default):
-tests/sync-parity-test.sh
-
-# Cena, tryb full:
-tests/sync-parity-test.sh full
-
-# Stock, tryb tick:
-TEST_FIELD=stock tests/sync-parity-test.sh tick
-
-# Stock, pełny, 10 produktów do mutacji:
-TEST_FIELD=stock PARITY_TEST_K=10 tests/sync-parity-test.sh full
-```
-
-**Wymagania:** `tests/perf.env` z endpointami rigu (gitignored — skopiuj z `perf.env.example`). Skrypt potrzebuje SSH do źródła i celu, wp-cli na obu, InfluxDB i Grafana (best-effort emit).
-
-**Dodatkowe pełne sprawdzenia (tryb `full`):**
-- **Variable rollup:** porównuje `min_price`/`max_price` produktów zmiennych z rzeczywistymi cenami wariacji (tolerancja ±0.01)
-- **Soft-delete tagging:** próbuje 100 produktów draft, sprawdza czy te bez `_wps_synced` mają tag `wps-usuniete`
-
-### Performance benchmark (`tests/perf-run.sh`)
-
-Times full sync run i loguje metryki do CSV + Grafana annotation.
-
-```bash
-# Baseline (wipe+recreate):
-tests/perf-run.sh baseline-v0.9.23
-
-# Incremental (update in place):
-tests/perf-run.sh incremental 0   # label=incremental, force_full=0
-
-# Default: wipe+recreate, label="manual"
-tests/perf-run.sh
-```
-
-**Auto-regression check:** porównuje duration z historycznym mediana baseline-ów — warning na stderr jeśli >1.5× median.
-
-### Grafana dashboard push
-
-```bash
-tests/apply-dashboard.sh
-```
-
-Wypycha `tests/grafana-dashboard.json` do live Grafany (uid `wps-perf`). Automatycznie dodaje price-parity panels + wps-price annotation overlay.
-
-### Systemd timers (automated testing)
-
-```bash
-# Zainstaluj timery:
-sudo cp tests/systemd/wps-*.timer tests/systemd/wps-*.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now wps-price-tick.timer   # hourly price parity @:30
-sudo systemctl enable --now wps-stock-tick.timer    # hourly stock parity @:00
-# Full sync parity test (daily noon):
-sudo systemctl enable --now wps-price-full.timer    # daily 12:00
-
-# Status:
-systemctl list-timers | grep wps
-journalctl -u wps-price-tick --since "1 hour ago" --no-pager
-```
-
-### PHPCS-WP linting (standalone)
-
-Po zainstalowaniu composer deps (`composer install`):
-
-```bash
-# Dry-run check:
-composer phpcs wc-product-sync.php
-
-# Auto-fix (review before committing!):
-composer phpcbf wc-product-sync.php
-
-# Only warn about unprepared SQL queries:
-composer phpcs --standard=WordPress.DB.PreparedSQL.NotPrepared wc-product-sync.php
-```
-
-### Testing on remote rig without scripts
-
-Jeśli nie masz skryptów na rigu, możesz uruchomić inline PHP:
-
-```bash
-# Smoke test inline:
-wp eval '
-if ( class_exists( "WC_Product_Sync" ) && \WC_Product_Sync::instance() !== null ) {
-    echo "OK: plugin loaded, singleton OK\n"; exit(0);
-} else {
-    echo "FAIL: plugin load or singleton failed\n"; exit(1);
-}'
-```
-
