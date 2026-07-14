@@ -83,9 +83,6 @@ final class WC_Product_Sync {
 	/** Czy pobieranie wariacji napotkało błąd (blokada usunięć) */
 	private $variations_fetch_error = false;
 	/** Czy pobieranie definicji atrybutów globalnych się nie powiodło (blokada, by nie zniszczyć wariantów) */
-	private $attributes_fetch_failed = false;
-	/** Powód nieudanego pobrania atrybutów globalnych (np. "HTTP 401 z ...") — do raportu w adminie */
-	private $attributes_fetch_error = '';
 	/** Czy w tym przebiegu próbowano już fallbacku na /products/attributes (maks. raz) */
 	private $attributes_fetch_tried = false;
 	/** Bufor raportu bieżącego batcha: bucket => lista wpisów (scalany do opcji po batchu) */
@@ -96,6 +93,8 @@ final class WC_Product_Sync {
 	private $last_skip_reason = '';
 	/** Czy przy ostatnim produkcie nie udało się pobrać obrazu (→ liczone jako błąd) */
 	private $last_image_failed = false;
+	/** Czy przy ostatnim produkcie poległa którakolwiek wariacja (→ liczone jako błąd) */
+	private $last_variation_failed = false;
 	/** Czy trwa AKTUALIZACJA (true) czy TWORZENIE (false) — pola bramkujemy tylko przy aktualizacji */
 	private $writing_update = false;
 	/** Szybka synchronizacja: tylko wybrane pola (fast_sync_fields), tylko aktualizacja istniejących
@@ -1337,20 +1336,17 @@ $defaults = array(
 
 	private function fetch_source_attributes() {
 		$out  = array();
-		$this->attributes_fetch_failed = false;
-		$this->attributes_fetch_error  = '';
 		$list = $this->api_get( '/wp-json/wc/v3/products/attributes', array( 'per_page' => 100 ) );
 		if ( is_wp_error( $list ) ) {
 			// Signal failure: without the global-attribute map, variable products would be
 			// rebuilt with NO attributes (map lookup → null → skipped), silently wiping them.
-			$this->attributes_fetch_failed = true;
+
 			// Keep the underlying reason. Without it the admin only ever saw "could not fetch
 			// attribute definitions", with no hint that it was an HTTP 401 — and this endpoint
 			// fails for a DIFFERENT reason than /products: WooCommerce guards it with
 			// `manage_product_terms`, not `read_private_products`, so a key whose user can list
 			// products may still be unable to read attributes.
-			$this->attributes_fetch_error = $list->get_error_message();
-			$this->log( 'warning', 'Fallback /products/attributes nieudany: ' . $this->attributes_fetch_error
+			$this->log( 'warning', 'Fallback /products/attributes nieudany: ' . $list->get_error_message()
 				. ' — endpoint wymaga uprawnienia "manage_product_terms" (Administrator lub Kierownik sklepu),'
 				. ' innego niż czytanie produktów. Mapa atrybutów jest odtwarzana z payloadów, więc zwykle nie jest potrzebny.' );
 			return $out;
@@ -1515,10 +1511,8 @@ $defaults = array(
 		// payload ever turns up with an attribute id it cannot resolve (see there). On a normal run
 		// that request is never made, so a key without `manage_product_terms` syncs cleanly and
 		// silently — no request, no 401, no warning on every run.
-		$this->source_attributes        = array();
-		$this->attributes_fetch_failed  = false;
-		$this->attributes_fetch_error   = '';
-		$this->attributes_fetch_tried   = false;
+		$this->source_attributes      = array();
+		$this->attributes_fetch_tried = false;
 
 		$total_counted    = 0;
 		$source_keys      = array();
@@ -1846,7 +1840,8 @@ $defaults = array(
 
 		$this->last_match_method  = '';
 		$this->last_skip_reason   = '';
-		$this->last_image_failed  = false;
+		$this->last_image_failed     = false;
+		$this->last_variation_failed = false;
 		try {
 			$result = $this->dispatch_upsert( $p, $dry_run );
 			if ( isset( $stats[ $result ] ) ) {
@@ -1860,6 +1855,10 @@ $defaults = array(
 			if ( $this->last_image_failed ) {
 				$stats['errors']++;
 				$this->report_add( 'errors', $base + array( 'reason' => 'nie pobrano obrazów (produkt zachowany, obrazy bez zmian)' ) );
+			}
+			if ( $this->last_variation_failed ) {
+				$stats['errors']++;
+				$this->report_add( 'errors', $base + array( 'reason' => 'część wariacji nie została zsynchronizowana (szczegóły w logu)' ) );
 			}
 			if ( 'created' === $result ) {
 				$this->report_add( 'created', $base + array( 'how' => 'nowy produkt' ) );
@@ -2442,7 +2441,11 @@ $defaults = array(
 
 				$kept[ $new_vid ] = true;
 			} catch ( \Throwable $e ) {
-				$this->log( 'warning', sprintf( 'Wariacja (SKU=%s) rodzica %d: %s', $sv['sku'] ?? '', $target_parent_id, $e->getMessage() ) );
+				// A dropped variation is missing product data, not a footnote. It used to log at
+				// 'warning' and leave the run reporting błędy=0 — a variable product quietly short
+				// of a variation, looking like a clean sync. The parent is counted as an error.
+				$this->last_variation_failed = true;
+				$this->log( 'error', sprintf( 'Wariacja (SKU=%s) rodzica %d: %s', $sv['sku'] ?? '', $target_parent_id, $e->getMessage() ) );
 			}
 		}
 
