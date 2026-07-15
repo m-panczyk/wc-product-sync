@@ -19,7 +19,8 @@ FILE="${2:-$(cd "$(dirname "$0")/.." && pwd)/CHANGELOG.md}"
 awk -v ver="$VERSION" '
 	# A version heading: "### <ver>" possibly followed by " (current)" or " — title".
 	/^### / {
-		# Extract the version token: 3rd field of the heading.
+		# Version token is the 2nd field: "### 0.9.27 (current) — ..." → $1=###, $2=0.9.27.
+		# Compared with == (string equality, not regex), so a dotted version is safe.
 		v = $2
 		if ( in_section ) { exit }          # next version heading ends our section
 		if ( v == ver ) { in_section = 1; print; next }
