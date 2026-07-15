@@ -53,13 +53,16 @@ jobs:
       - name: update.json carries real release notes
         run: |
           python3 - <<'PY'
-          import json
+          import json, re
           v = None
           for line in open("wc-product-sync.php"):
               if "Version:" in line:
-                  import re; v = re.search(r"Version:\s*([0-9][0-9A-Za-z.-]*)", line).group(1); break
+                  v = re.search(r"Version:\s*([0-9][0-9A-Za-z.-]*)", line).group(1); break
+          # A prerelease (0.9.27-beta1) shares the changelog of its base version (0.9.27) — same
+          # rule as scripts/changelog-section.sh. Strip the suffix before matching the heading.
+          base = v.split("-", 1)[0]
           c = json.load(open("dist/update.json"))["sections"]["changelog"]
-          assert c.strip().startswith(f"### {v}"), f"changelog does not open with the {v} section: {c[:60]!r}"
+          assert c.strip().startswith(f"### {base}"), f"changelog does not open with the {base} section: {c[:60]!r}"
           assert "CHANGELOG.md" not in c[:40], "changelog is still a pointer, not the real notes"
-          print(f"ok: update.json changelog is the {v} section ({len(c)} chars)")
+          print(f"ok: update.json changelog is the {base} section ({len(c)} chars) for version {v}")
           PY
