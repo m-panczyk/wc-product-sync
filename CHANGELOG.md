@@ -1,6 +1,6 @@
 ## Zmiany (Changelog)
 
-### 0.9.28 (current) — scalanie, cofanie synchronizacji, [krytyczne] naprawa dopasowania po nazwie
+### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, [krytyczne] naprawa dopasowania po nazwie
 
 - **[krytyczne] Dopasowanie po nazwie nigdy nie działało.** `find_existing_product()` używało
   `get_posts( "post_title" => ... )`, a WP_Query **nie zna** parametru `post_title` (poprawny to
@@ -16,9 +16,6 @@
   **utworzone** w ostatnim przebiegu; nie rusza zaktualizowanych ani starych sklepowych. Produkty są
   znakowane `_wps_created_run` przy tworzeniu; dla przebiegów sprzed tej wersji działa fallback po
   `_wps_source_id` + dacie utworzenia. Przycisk **„Cofnij ostatnią synchronizację (N)"**.
-
-### 0.9.27 (current) — `/products/attributes` nie jest już w ogóle wołany
-
 - **Endpoint atrybutów przestał być wymagany.** WooCommerce pilnuje `/products/attributes`
   uprawnieniem **`manage_product_terms`**, a `/products` tylko `read_private_products` — więc klucz
   API potrafi czytać **cały katalog** i mimo to dostawać `401` na atrybutach. Do 0.9.26 **przerywało
