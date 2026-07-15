@@ -594,5 +594,25 @@ FAIL6=0
 [ "$FAIL6" -eq 0 ] || exit 1
 echo "  PASS: pre-existing product adopted by name, re-sync updated it (no duplicate)"
 
+# --- Phase 7: update-channel setting selects the metadata URL ------------------------------
+#
+# WordPress has no per-plugin channel UI, so the plugin adds one: a setting that picks which
+# update.json the updater polls. This asserts the setting actually routes, and that the
+# wp-config constant still overrides it.
+echo "==> Phase 7: update channel setting routes the updater URL"
+
+CH="$(twp eval '
+$s=WC_Product_Sync::instance();
+$m=new ReflectionMethod("WC_Product_Sync","update_url");$m->setAccessible(true);
+$o=(array)get_option("wc_product_sync_options",array());
+$o["update_channel"]="stable"; update_option("wc_product_sync_options",$o);
+$stable=strpos($m->invoke($s),"/latest/")!==false ? "ok":"bad";
+$o["update_channel"]="rc"; update_option("wc_product_sync_options",$o);
+$rc=strpos($m->invoke($s),"/latest-beta/")!==false ? "ok":"bad";
+echo "$stable $rc";')"
+echo "    stable=$(echo $CH|cut -d" " -f1)  rc=$(echo $CH|cut -d" " -f2)"
+[ "$CH" = "ok ok" ] || { echo "  FAIL: channel setting does not route the update URL ($CH)" >&2; exit 1; }
+echo "  PASS: stable→latest, rc→latest-beta"
+
 echo
-echo "e2e PASS (multi-batch + force-full + image-failure + empty-source + undo + adopt)"
+echo "e2e PASS (multi-batch + force-full + image-failure + empty-source + undo + adopt + channel)"

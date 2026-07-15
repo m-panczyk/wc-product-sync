@@ -2,6 +2,11 @@
 
 ### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, [krytyczne] naprawa dopasowania po nazwie
 
+- **Wybór kanału aktualizacji w panelu.** Lista „Kanał aktualizacji": **Stabilny** (kanał produkcyjny)
+  lub **Testowy (RC)** (kandydaci do wydania). WordPress nie ma natywnego wyboru kanału dla wtyczek — to
+  ustawienie kieruje updater na właściwy `update.json` bez edycji `wp-config.php`. Stała
+  `WC_PRODUCT_SYNC_UPDATE_URL` (jeśli ustawiona) ma pierwszeństwo i blokuje pole. Zmiana kanału od razu
+  odświeża sprawdzanie aktualizacji.
 - **[krytyczne] Dopasowanie po nazwie nigdy nie działało.** `find_existing_product()` używało
   `get_posts( "post_title" => ... )`, a WP_Query **nie zna** parametru `post_title` (poprawny to
   `title`) — filtr był po cichu ignorowany. Skutki: przy **jednym** kandydacie na celu każdy
