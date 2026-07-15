@@ -14,6 +14,10 @@ set -euo pipefail
 
 VERSION="${1:?usage: changelog-section.sh <version> [changelog-path]}"
 FILE="${2:-$(cd "$(dirname "$0")/.." && pwd)/CHANGELOG.md}"
+
+# A prerelease shares the changelog of the version it precedes: 0.9.27-beta1 → look for 0.9.27.
+# The beta IS that version under test, so its release notes are that version's notes.
+VERSION="${VERSION%%-*}"
 [ -f "$FILE" ] || { echo "changelog not found: $FILE" >&2; exit 1; }
 
 awk -v ver="$VERSION" '
