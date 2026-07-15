@@ -379,6 +379,84 @@ docker compose cp mu/00-e2e-http-urls.php src-wp:/var/www/html/wp-content/mu-plu
 [ "$FAIL" -eq 0 ] || exit 1
 echo "  PASS: existing images preserved, failure counted as an error"
 
+# --- Phase 3b: the sync must survive losing /products/attributes ---------------------------
+#
+# WooCommerce guards /products/attributes with `manage_product_terms`, while /products only needs
+# `read_private_products`. So an API key can list the entire catalog and still get 401 on the
+# attributes endpoint — and plenty of stores cannot issue a broader key. That used to abort every
+# single run.
+#
+# It does not have to: the map only ever carried name + slug per attribute, and WooCommerce ships
+# both inline in every product AND variation payload. This proves the plugin rebuilds the map from
+# the payloads and still creates the global attribute on the target.
+echo "==> Phase 3b: global attributes must still sync when /products/attributes is 401"
+
+cat > /tmp/wps-block-attr.php <<'PHP'
+<?php
+// Test rig only. Two jobs:
+//  1. Record every hit on /products/attributes, so the test can assert the plugin does not even
+//     ASK for it — a request that is never made cannot 401, cannot need a permission, and cannot
+//     spam a warning into the log on every run.
+//  2. If it is asked for anyway, return the exact 401 a key without manage_product_terms gets,
+//     so the fallback path is exercised rather than accidentally succeeding.
+add_filter( 'rest_pre_dispatch', function ( $result, $server, $request ) {
+	if ( '/wc/v3/products/attributes' === $request->get_route() ) {
+		file_put_contents( '/tmp/wps-attr-hits', "hit\n", FILE_APPEND );
+		return new WP_Error( 'woocommerce_rest_cannot_view', 'Przepraszamy, ale nie możesz listować zasobów.', array( 'status' => 401 ) );
+	}
+	return $result;
+}, 10, 3 );
+PHP
+docker compose cp /tmp/wps-block-attr.php src-wp:/var/www/html/wp-content/mu-plugins/wps-block-attr.php >/dev/null
+docker compose exec -T -u 0 src-wp rm -f /tmp/wps-attr-hits >/dev/null 2>&1 || true
+
+# Force a real rebuild: drop the product and the attribute taxonomy from the target, so the sync
+# has to recreate both WITHOUT the endpoint. Otherwise it would pass on leftovers from phase 1.
+twp eval '
+$id = wc_get_product_id_by_sku( "E2E-GA-001" );
+if ( $id ) { wp_delete_post( $id, true ); }
+$aid = wc_attribute_taxonomy_id_by_name( "kolor" );
+if ( $aid ) { wc_delete_attribute( $aid ); }
+' >/dev/null
+twp eval 'foreach ( glob( WP_CONTENT_DIR . "/uploads/wc-logs/wc-product-sync*.log" ) as $f ) { unlink( $f ); }' >/dev/null
+drive >/dev/null
+
+ATTR_OK="$(twp eval '
+if ( ! taxonomy_exists( "pa_kolor" ) ) { echo "no-taxonomy"; exit; }
+$p = wc_get_product( wc_get_product_id_by_sku( "E2E-GA-001" ) );
+if ( ! $p ) { echo "no-product"; exit; }
+$ok = false;
+foreach ( $p->get_attributes() as $k => $a ) {
+	if ( "pa_kolor" === $k && $a->is_taxonomy() && count( $a->get_options() ) >= 2 ) { $ok = true; }
+}
+if ( ! $ok ) { echo "no-attribute"; exit; }
+if ( count( $p->get_children() ) < 2 ) { echo "no-variations"; exit; }
+echo "ok";
+')"
+ERRS_3B="$(twp eval '$r = get_option( "wps_last_sync_result" ); echo (int) ( $r["errors"] ?? 0 );')"
+HITS="$(docker compose exec -T src-wp sh -c 'wc -l < /tmp/wps-attr-hits 2>/dev/null || echo 0' | tr -d '\r ')"
+
+docker compose exec -T -u 0 src-wp rm -f /var/www/html/wp-content/mu-plugins/wps-block-attr.php
+
+if [ "$ATTR_OK" != "ok" ]; then
+	echo "  FAIL: the global attribute did not sync ($ATTR_OK)" >&2
+	echo "        A store whose key cannot read /products/attributes would lose its variable" >&2
+	echo "        products' attributes entirely." >&2
+	exit 1
+fi
+if [ "$ERRS_3B" -ne 0 ]; then
+	echo "  FAIL: the run reported błędy=$ERRS_3B — not having that endpoint must not be an error" >&2
+	exit 1
+fi
+# The strong claim: not "it survives a 401", but "it never asks". An unmade request cannot fail,
+# cannot demand a capability the key does not have, and cannot log a warning on every single run.
+if [ "$HITS" != "0" ]; then
+	echo "  FAIL: /products/attributes was requested $HITS time(s) — it should never be needed," >&2
+	echo "        since name+slug arrive inline with every product and variation payload." >&2
+	exit 1
+fi
+echo "  PASS: pa_kolor built from payloads; /products/attributes never requested (0 hits), błędy=0"
+
 # --- Phase 4: an empty source must never wipe the target ----------------------------------
 #
 # HTTP 200 + an empty list is what the source returns when the API key belongs to a user who

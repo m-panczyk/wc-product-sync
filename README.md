@@ -519,7 +519,25 @@ mapa `_wps_image_map` już nie istnieje.
 
 ## Zmiany (Changelog)
 
-### 0.9.26 (current) — czytelny błąd przy braku dostępu do atrybutów globalnych
+### 0.9.27 (current) — sync działa BEZ dostępu do `/products/attributes`
+
+- **Endpoint atrybutów przestał być wymagany.** WooCommerce pilnuje `/products/attributes`
+  uprawnieniem **`manage_product_terms`**, a `/products` tylko `read_private_products` — więc klucz
+  API potrafi czytać **cały katalog** i mimo to dostawać `401` na atrybutach. Do 0.9.26 **przerywało
+  to każdy przebieg**, a sklepy, które nie mogą dostać szerszego klucza, nie miały jak synchronizować.
+- **Co się okazało:** mapa z tego endpointu niosła tylko **dwa pola** (`name` + `slug`), a WooCommerce
+  wysyła oba **inline w każdym produkcie i wariacji**:
+  `"attributes":[{"id":1,"name":"Kolor","slug":"pa_kolor","options":[…]}]`.
+  Wtyczka odtwarza więc mapę z payloadów. Pozostałe pola endpointu (`type`, `order_by`,
+  `has_archives`) i tak nigdy nie były używane — przy tworzeniu atrybutu są zakładane na sztywno.
+- **Efekt:** brak dostępu do `/products/attributes` to teraz **ostrzeżenie**, nie awaria. Atrybuty
+  globalne, terminy i przypisania wariacji dojeżdżają normalnie. Zweryfikowane na rigu: przy `401` na
+  tym endpoincie sync tworzy 50 produktów, `błędy=0`, taksonomia `pa_kolor` powstaje na celu.
+- **Bezpiecznik zamiast cichego czyszczenia:** atrybut, którego naprawdę nie da się odwzorować, nie
+  jest już po cichu pomijany (co dla `variable` znaczyło przebudowę **bez atrybutów**). Produkt jest
+  **pomijany i raportowany jako błąd**, a jego dane zostają nietknięte.
+
+### 0.9.26 — czytelny błąd przy braku dostępu do atrybutów globalnych
 
 - **Powód przerwania przebiegu widać wreszcie w adminie.** Gdy nie udało się pobrać
   `/products/attributes`, raport pokazywał tylko ogólnik „Nie pobrano definicji atrybutów globalnych",
