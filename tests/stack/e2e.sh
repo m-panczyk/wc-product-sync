@@ -498,5 +498,101 @@ fi
 [ "$FAIL4" -eq 0 ] || exit 1
 echo "  PASS: $AFTER_N products intact, run reported błędy=$ERRS"
 
+# --- Phase 5: undo last sync trashes exactly what the run created, nothing else ------------
+#
+# The scenario this is for: a first sync against a store that already had products creates
+# duplicates instead of matching them, and the operator needs to take exactly those back out
+# without touching the pre-existing catalog.
+echo "==> Phase 5: undo trashes the run's creations only"
+
+# Clean, deterministic reset (do not depend on leftover state from earlier phases).
+# Source: three simple products. Target: one pre-existing product matching KEEP-1 by SKU, so the
+# sync UPDATES it (survives undo); the other two are created fresh (undo must trash exactly those).
+swp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"), "post_status"=>"any", "numberposts"=>-1, "fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+foreach ( array("KEEP-1","NEW-1","NEW-2") as $i => $sku ) {
+	$p = new WC_Product_Simple();
+	$p->set_name( "Undo P$i" ); $p->set_sku( $sku ); $p->set_regular_price( (string)(10+$i) ); $p->set_status( "publish" ); $p->save();
+}' >/dev/null
+
+twp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"), "post_status"=>"any", "numberposts"=>-1, "fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$p = new WC_Product_Simple();
+$p->set_name( "Undo P0" ); $p->set_sku( "KEEP-1" ); $p->set_regular_price( "1.00" ); $p->set_status( "publish" ); $p->save();' >/dev/null
+
+opt force_full_sync 0
+drive >/dev/null
+
+CREATED="$(twp eval '$r=get_option("wps_last_sync_result"); echo (int)($r["created"]??0);')"
+UNDO_N="$(twp eval 'echo (int) WC_Product_Sync::instance()->undo_run(0, true);')"   # dry-run count
+echo "    run created $CREATED, undo would trash $UNDO_N"
+
+# The keeper (updated, not created) must NOT be in the undo set.
+KEEP_IN_UNDO="$(twp eval '
+$m=new ReflectionMethod("WC_Product_Sync","products_created_by_run");$m->setAccessible(true);
+$tok=(new ReflectionMethod("WC_Product_Sync","last_run_token")); $tok->setAccessible(true);
+$ids=$m->invoke(WC_Product_Sync::instance(), $tok->invoke(WC_Product_Sync::instance()));
+echo in_array( wc_get_product_id_by_sku("KEEP-1"), array_map("intval",$ids), true ) ? "yes" : "no";')"
+
+FAIL5=0
+[ "$UNDO_N" -eq "$CREATED" ] || { echo "  FAIL: undo count $UNDO_N != created $CREATED" >&2; FAIL5=1; }
+[ "$KEEP_IN_UNDO" = "no" ] || { echo "  FAIL: the pre-existing (updated) product is in the undo set" >&2; FAIL5=1; }
+
+# Actually undo, then check: creations gone (trashed), keeper still published.
+twp eval 'WC_Product_Sync::instance()->undo_run(0, false);' >/dev/null
+AFTER_PUB="$(twp eval 'echo count( get_posts( array( "post_type"=>"product","post_status"=>"publish","numberposts"=>-1,"fields"=>"ids" ) ) );')"
+TRASHED="$(twp eval 'echo count( get_posts( array( "post_type"=>"product","post_status"=>"trash","numberposts"=>-1,"fields"=>"ids" ) ) );')"
+KEEPER_PUB="$(twp eval '$id=wc_get_product_id_by_sku("KEEP-1"); echo ($id && get_post_status($id)==="publish") ? "yes":"no";')"
+echo "    after undo: published=$AFTER_PUB trashed=$TRASHED keeper_published=$KEEPER_PUB"
+
+[ "$TRASHED" -ge "$CREATED" ] || { echo "  FAIL: expected >= $CREATED trashed, got $TRASHED" >&2; FAIL5=1; }
+[ "$KEEPER_PUB" = "yes" ] || { echo "  FAIL: the pre-existing product was trashed by undo" >&2; FAIL5=1; }
+[ "$FAIL5" -eq 0 ] || exit 1
+echo "  PASS: undo trashed the $CREATED creations, kept the pre-existing product, reversible (Trash)"
+
+# --- Phase 6: adopt existing products so a re-sync updates instead of duplicating ----------
+#
+# The real-world scenario: the target already has a product from another tool, with the SAME
+# name as a source product but a DIFFERENT SKU. A plain sync cannot match it by SKU, so it would
+# create a duplicate. adopt_existing() stamps _wps_source_id onto that pre-existing product by
+# name, and then the sync updates it. (This also exercises the fixed name matching: the old
+# 'post_title' query was ignored, so name matching never worked.)
+echo "==> Phase 6: adopt existing products (no duplicate on re-sync)"
+
+swp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"), "post_status"=>"any", "numberposts"=>-1, "fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$p = new WC_Product_Simple();
+$p->set_name( "Adopt Target Widget" ); $p->set_sku( "SRC-ADOPT-1" ); $p->set_regular_price( "99.00" ); $p->set_status( "publish" ); $p->save();' >/dev/null
+
+twp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"), "post_status"=>"any", "numberposts"=>-1, "fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$p = new WC_Product_Simple();
+$p->set_name( "Adopt Target Widget" ); $p->set_sku( "OLD-DIFFERENT-SKU" ); $p->set_regular_price( "1.00" ); $p->set_status( "publish" ); $p->save();' >/dev/null
+
+PRE_ID="$(twp eval 'echo wc_get_product_id_by_sku("OLD-DIFFERENT-SKU");')"
+
+# 1) DRY adopt: plan to adopt by name, write nothing.
+twp eval 'WC_Product_Sync::instance()->adopt_existing( true );' >/dev/null
+STILL_UNCLAIMED="$(twp eval '$v=get_post_meta('"$PRE_ID"',"_wps_source_id",true); echo $v===""?"yes":"no";')"
+[ "$STILL_UNCLAIMED" = "yes" ] || { echo "  FAIL: dry-run adopt wrote _wps_source_id (must not)" >&2; exit 1; }
+
+# 2) Real adopt: stamps _wps_source_id.
+twp eval 'WC_Product_Sync::instance()->adopt_existing( false );' >/dev/null
+CLAIMED_NOW="$(twp eval '$v=get_post_meta('"$PRE_ID"',"_wps_source_id",true); echo $v!==""?"yes":"no";')"
+[ "$CLAIMED_NOW" = "yes" ] || { echo "  FAIL: adopt did not stamp _wps_source_id" >&2; exit 1; }
+
+# 3) Sync: must UPDATE the adopted product (1.00 -> 99.00), NOT create a duplicate.
+opt force_full_sync 0
+drive >/dev/null
+N_WIDGETS="$(twp eval 'echo count( get_posts( array( "post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Adopt Target Widget" ) ) );')"
+ADOPTED_PRICE="$(twp eval '$p=wc_get_product('"$PRE_ID"'); echo $p?$p->get_regular_price():"gone";')"
+echo "    after re-sync: count 'Adopt Target Widget'=$N_WIDGETS  adopted price=$ADOPTED_PRICE"
+
+FAIL6=0
+[ "$N_WIDGETS" -eq 1 ] || { echo "  FAIL: expected 1 product, got $N_WIDGETS (duplicate despite adoption)" >&2; FAIL6=1; }
+[ "$ADOPTED_PRICE" = "99.00" ] || { echo "  FAIL: adopted product not updated from source (price=$ADOPTED_PRICE)" >&2; FAIL6=1; }
+[ "$FAIL6" -eq 0 ] || exit 1
+echo "  PASS: pre-existing product adopted by name, re-sync updated it (no duplicate)"
+
 echo
-echo "e2e PASS (multi-batch sync + force-full + image-failure + empty-source safety)"
+echo "e2e PASS (multi-batch + force-full + image-failure + empty-source + undo + adopt)"

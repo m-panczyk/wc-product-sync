@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.27-beta1
+ * Version:           0.9.28
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -63,6 +63,10 @@ final class WC_Product_Sync {
 	const TAG_SLUG          = 'wps-usuniete';
 	const TAG_NAME          = 'Usunięte (sync)';
 	const META_SOURCE_ID    = '_wps_source_id';
+	/** Timestamp of the run that CREATED this product (= that run's started_at). Lets
+	 *  "undo last sync" trash exactly the products a given run created, and nothing it
+	 *  merely updated or that pre-dated the plugin. */
+	const META_CREATED_RUN  = '_wps_created_run';
 	const META_IMAGE_MAP    = '_wps_image_map'; // JSON: source image key => local attachment id (incremental sync)
 
 	/** @var WC_Product_Sync|null */
@@ -95,6 +99,10 @@ final class WC_Product_Sync {
 	private $last_image_failed = false;
 	/** Czy przy ostatnim produkcie poległa którakolwiek wariacja (→ liczone jako błąd) */
 	private $last_variation_failed = false;
+	/** Lokalne ID ostatnio zapisanego produktu (create lub update) — do znakowania _wps_created_run */
+	private $last_saved_id = 0;
+	/** started_at bieżącego przebiegu; ten sam we wszystkich batchach (z SYNC_LAST_RESULT) */
+	private $run_started_at = 0;
 	/** Czy trwa AKTUALIZACJA (true) czy TWORZENIE (false) — pola bramkujemy tylko przy aktualizacji */
 	private $writing_update = false;
 	/** Szybka synchronizacja: tylko wybrane pola (fast_sync_fields), tylko aktualizacja istniejących
@@ -116,6 +124,8 @@ final class WC_Product_Sync {
 		add_action( 'admin_post_wc_product_sync_run', array( $this, 'handle_manual_run' ) );
 		add_action( 'admin_post_wc_product_sync_cancel', array( $this, 'handle_cancel_sync' ) );
 		add_action( 'admin_post_wc_product_sync_step', array( $this, 'handle_step_sync' ) );
+		add_action( 'admin_post_wc_product_sync_undo', array( $this, 'handle_undo' ) );
+		add_action( 'admin_post_wc_product_sync_adopt', array( $this, 'handle_adopt' ) );
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
 		add_action( self::RESUME_HOOK, array( $this, 'run_resume_batch' ) );
 		add_action( self::FAST_CRON_HOOK, array( $this, 'run_fast_sync_cron' ) );
@@ -732,6 +742,10 @@ $defaults = array(
 		$fast_next = wp_next_scheduled( self::FAST_CRON_HOOK );
 		$run_url = wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_run&mode=run' ), self::NONCE_ACTION );
 		$dry_url = wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_run&mode=dry' ), self::NONCE_ACTION );
+		$undo_url        = wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_undo' ), self::NONCE_ACTION . '_undo' );
+		$adopt_prev_url  = wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_adopt&mode=preview' ), self::NONCE_ACTION . '_adopt' );
+		$adopt_apply_url = wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_adopt&mode=apply' ), self::NONCE_ACTION . '_adopt' );
+		$undo_count      = $this->last_run_undo_count();
 		$progress = $this->get_sync_progress();
 
 		// Render progress section if sync is in progress
@@ -857,6 +871,14 @@ $defaults = array(
 			<?php elseif ( isset( $_GET['cancelled'] ) ) : ?>
 				<div class="notice notice-warning is-dismissible"><p>
 					<?php esc_html_e( 'Synchronizacja anulowana. Postęp nie został zapisany — produkty przetwarzane w tym batchu mogą wymagać ponownego przetworzenia.', 'wc-product-sync' ); ?>
+				</p></div>
+			<?php elseif ( isset( $_GET['undone'] ) ) : ?>
+				<div class="notice notice-success is-dismissible"><p>
+					<?php printf( esc_html__( 'Cofnięto: %d produktów przeniesiono do kosza. Możesz je przywrócić w Produkty → Kosz.', 'wc-product-sync' ), (int) $_GET['undone'] ); ?>
+				</p></div>
+			<?php elseif ( isset( $_GET['adopted'] ) ) : ?>
+				<div class="notice notice-success is-dismissible"><p>
+					<?php printf( esc_html__( 'Scalono: %d istniejących produktów oznaczono jako zsynchronizowane. Następna synchronizacja je zaktualizuje zamiast tworzyć duplikaty.', 'wc-product-sync' ), (int) $_GET['adopted'] ); ?>
 				</p></div>
 			<?php endif; ?>
 
@@ -1095,6 +1117,53 @@ $defaults = array(
 						onclick="return confirm('<?php echo esc_js( __( 'Uruchomić synchronizację teraz?', 'wc-product-sync' ) ); ?>');">
 						<?php esc_html_e( 'Synchronizuj teraz', 'wc-product-sync' ); ?></a>
 				</p>
+
+				<h3><?php esc_html_e( 'Scalanie i cofanie', 'wc-product-sync' ); ?></h3>
+				<p class="description" style="max-width:60em">
+					<?php esc_html_e( 'Gdy w sklepie są już produkty założone innym narzędziem, „Scal istniejące" nadaje im znacznik źródła po SKU lub jednoznacznej nazwie — dzięki temu kolejna synchronizacja je zaktualizuje, zamiast tworzyć duplikaty. „Cofnij ostatnią synchronizację" przenosi do kosza produkty utworzone w ostatnim przebiegu (odwracalne).', 'wc-product-sync' ); ?>
+				</p>
+				<p>
+					<a href="<?php echo esc_url( $adopt_prev_url ); ?>" class="button">
+						<?php esc_html_e( 'Scal istniejące — podgląd', 'wc-product-sync' ); ?></a>
+					<a href="<?php echo esc_url( $undo_url ); ?>" class="button"
+						onclick="return confirm('<?php echo esc_js( __( 'Przenieść do kosza produkty utworzone w ostatniej synchronizacji?', 'wc-product-sync' ) ); ?>');">
+						<?php printf( esc_html__( 'Cofnij ostatnią synchronizację (%d)', 'wc-product-sync' ), (int) $undo_count ); ?></a>
+				</p>
+
+				<?php
+				// Adoption preview table, if one was just generated.
+				if ( isset( $_GET['adopt_preview'] ) ) :
+					$plan = get_transient( 'wps_adopt_preview' );
+					if ( is_array( $plan ) ) :
+						$n_adopt = count( $plan['adopt'] );
+						$n_amb   = count( $plan['ambiguous'] );
+						?>
+						<div class="notice notice-info"><p>
+							<?php printf( esc_html__( 'Podgląd scalania: do scalenia %1$d, wieloznacznych (do ręcznego sprawdzenia) %2$d, już przypisanych %3$d.', 'wc-product-sync' ),
+								$n_adopt, $n_amb, (int) $plan['claimed'] ); ?>
+							<?php if ( $n_adopt ) : ?>
+								<a href="<?php echo esc_url( $adopt_apply_url ); ?>" class="button button-primary"
+									onclick="return confirm('<?php echo esc_js( sprintf( __( 'Scalić %d produktów? Nada im znacznik źródła (odwracalne przez ponowne czyszczenie meta).', 'wc-product-sync' ), $n_adopt ) ); ?>');">
+									<?php printf( esc_html__( 'Scal %d teraz', 'wc-product-sync' ), $n_adopt ); ?></a>
+							<?php endif; ?>
+						</p></div>
+						<?php if ( $n_adopt ) : ?>
+							<table class="widefat striped" style="max-width:60em"><thead><tr>
+								<th><?php esc_html_e( 'Produkt (cel)', 'wc-product-sync' ); ?></th>
+								<th>SKU</th><th><?php esc_html_e( 'Dopasowano po', 'wc-product-sync' ); ?></th>
+							</tr></thead><tbody>
+							<?php foreach ( array_slice( $plan['adopt'], 0, 100 ) as $a ) : ?>
+								<tr>
+									<td><?php echo esc_html( get_the_title( $a['local_id'] ) ); ?> <span class="description">#<?php echo (int) $a['local_id']; ?></span></td>
+									<td><?php echo esc_html( $a['sku'] ?: '—' ); ?></td>
+									<td><?php echo esc_html( $a['how'] ); ?></td>
+								</tr>
+							<?php endforeach; ?>
+							</tbody></table>
+							<?php if ( $n_adopt > 100 ) : ?><p class="description"><?php printf( esc_html__( '…i %d więcej.', 'wc-product-sync' ), $n_adopt - 100 ); ?></p><?php endif; ?>
+						<?php endif; ?>
+					<?php endif; ?>
+				<?php endif; ?>
 			<?php endif; ?>
 			<p class="description">
 				<?php printf( esc_html__( 'Logi: %s', 'wc-product-sync' ), '<a href="' . esc_url( admin_url( 'admin.php?page=wc-status&tab=logs' ) ) . '">WooCommerce → Status → Logi</a>' ); ?>
@@ -1212,6 +1281,37 @@ $defaults = array(
 
 		$this->cancel_sync();
 		wp_safe_redirect( admin_url( 'admin.php?page=wc-product-sync&cancelled=1' ) );
+		exit;
+	}
+
+	/** Undo the last sync: trash the products that run created. Reversible (WooCommerce → Kosz). */
+	public function handle_undo() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( esc_html__( 'Brak uprawnień.', 'wc-product-sync' ) );
+		}
+		check_admin_referer( self::NONCE_ACTION . '_undo' );
+		$n = $this->undo_run();
+		wp_safe_redirect( add_query_arg(
+			array( 'page' => 'wc-product-sync', 'undone' => (int) $n ),
+			admin_url( 'admin.php' )
+		) );
+		exit;
+	}
+
+	/** Adopt existing products: preview shows the plan; confirm stamps _wps_source_id so the next
+	 *  sync updates them instead of creating duplicates. mode=preview writes nothing. */
+	public function handle_adopt() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( esc_html__( 'Brak uprawnień.', 'wc-product-sync' ) );
+		}
+		check_admin_referer( self::NONCE_ACTION . '_adopt' );
+		$preview = ( ( $_GET['mode'] ?? 'preview' ) !== 'apply' );
+		$plan    = $this->adopt_existing( $preview );
+		set_transient( 'wps_adopt_preview', $plan, 10 * MINUTE_IN_SECONDS );
+		wp_safe_redirect( add_query_arg(
+			array( 'page' => 'wc-product-sync', ( $preview ? 'adopt_preview' : 'adopted' ) => count( $plan['adopt'] ) ),
+			admin_url( 'admin.php' )
+		) );
 		exit;
 	}
 
@@ -1513,6 +1613,12 @@ $defaults = array(
 		// silently — no request, no 401, no warning on every run.
 		$this->source_attributes      = array();
 		$this->attributes_fetch_tried = false;
+
+		// Run-start token, identical across every resume batch (set once in reset_run_result,
+		// preserved by accumulate_run_result). Stamped onto products this run creates.
+		$run_result           = get_option( self::SYNC_LAST_RESULT, array() );
+		$this->run_started_at = ( is_array( $run_result ) && ! empty( $run_result['started_at'] ) )
+			? (int) $run_result['started_at'] : time();
 
 		$total_counted    = 0;
 		$source_keys      = array();
@@ -1861,6 +1967,12 @@ $defaults = array(
 				$this->report_add( 'errors', $base + array( 'reason' => 'część wariacji nie została zsynchronizowana (szczegóły w logu)' ) );
 			}
 			if ( 'created' === $result ) {
+				// Tag the product with the run that created it, so "undo last sync" can trash
+				// exactly this run's creations. Uses the same $result the report keys off, so it
+				// can never disagree with the "created" count.
+				if ( $this->last_saved_id ) {
+					update_post_meta( $this->last_saved_id, self::META_CREATED_RUN, $this->run_started_at ?: time() );
+				}
 				$this->report_add( 'created', $base + array( 'how' => 'nowy produkt' ) );
 			} elseif ( 'updated' === $result ) {
 				$this->report_add( 'updated', $base + array( 'how' => $this->last_match_method ? 'dopasowano po ' . $this->last_match_method : 'zaktualizowano' ) );
@@ -1974,9 +2086,14 @@ $defaults = array(
 		$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
 		if ( '' !== $name && ! empty( $p['id'] ) ) {
 			$src_id  = absint( $p['id'] );
+			// 'title' (exact match), NOT 'post_title' — WP_Query has no 'post_title' arg, so it was
+			// silently IGNORED: the query returned products regardless of name. With one candidate
+			// on the target that meant every unmatched source product falsely matched it (wrong
+			// product overwritten); with many, it always saw 2 and never matched (SKU-less/renamed
+			// products duplicated instead). The whole name fallback never actually matched by name.
 			$found   = get_posts( array(
 				'post_type'      => 'product',
-				'post_title'     => $name,
+				'title'          => $name,
 				'post_status'    => 'publish',
 				'posts_per_page' => 2,
 				'fields'         => 'ids',
@@ -2106,6 +2223,7 @@ $defaults = array(
 		if ( ! $id ) {
 			throw new \RuntimeException( 'save() zwróciło 0' );
 		}
+		$this->last_saved_id = (int) $id;
 		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
 		// Images on UPDATE too (incremental — only new/changed download). Gated by the "images"
 		// field so admins who manage images locally aren't overwritten.
@@ -2173,6 +2291,7 @@ $defaults = array(
 		if ( ! $id ) {
 			throw new \RuntimeException( 'save() zwróciło 0' );
 		}
+		$this->last_saved_id = (int) $id;
 		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
 		if ( $this->field_on( 'images' ) && ! empty( $p['images'] ) ) {
 			$this->sync_product_images( $product, $p['images'] );
@@ -2616,6 +2735,7 @@ $defaults = array(
 		if ( ! $id ) {
 			throw new \RuntimeException( 'save() zwróciło 0' );
 		}
+		$this->last_saved_id = (int) $id;
 		update_post_meta( $id, self::META_SOURCE_ID, (int) $p['id'] );
 		if ( $this->field_on( 'images' ) && ! empty( $p['images'] ) ) {
 			$this->sync_product_images( $product, $p['images'] );
@@ -2748,6 +2868,191 @@ $defaults = array(
 	/* =====================================================================
 	 *  Soft-delete
 	 * ================================================================== */
+
+	/* =====================================================================
+	 *  Cofanie synchronizacji (undo) — kosz na produkty utworzone w przebiegu
+	 * ================================================================== */
+
+	/** started_at of the most recent run, i.e. the run "undo last sync" targets, or 0. */
+	private function last_run_token() {
+		$r = get_option( self::SYNC_LAST_RESULT, array() );
+		return ( is_array( $r ) && ! empty( $r['started_at'] ) ) ? (int) $r['started_at'] : 0;
+	}
+
+	/** Product IDs that a given run created.
+	 *
+	 *  Primary signal is the _wps_created_run tag. But runs from before that tag existed (e.g. a
+	 *  build that created duplicates and only stamped _wps_source_id) have no tag — so when the tag
+	 *  finds nothing, fall back to the heuristic that defines "created this run": a product this
+	 *  plugin owns (_wps_source_id) whose post_date is at or after the run start. Updated products
+	 *  keep their old post_date, so they are never caught; a product added by hand during the run
+	 *  has no _wps_source_id, so it is never caught either. */
+	private function products_created_by_run( $token ) {
+		if ( $token < 1 ) {
+			return array();
+		}
+		$tagged = get_posts( array(
+			'post_type'      => 'product',
+			'post_status'    => 'any',
+			'posts_per_page' => -1,
+			'fields'         => 'ids',
+			'meta_key'       => self::META_CREATED_RUN,
+			'meta_value'     => (string) $token,
+		) );
+		if ( $tagged ) {
+			return $tagged;
+		}
+		return get_posts( array(
+			'post_type'      => 'product',
+			'post_status'    => 'any',
+			'posts_per_page' => -1,
+			'fields'         => 'ids',
+			'meta_key'       => self::META_SOURCE_ID,      // our product
+			'date_query'     => array( array(
+				'column' => 'post_date_gmt',
+				'after'  => gmdate( 'Y-m-d H:i:s', $token - 2 ), // created at/after run start
+				'inclusive' => true,
+			) ),
+		) );
+	}
+
+	/** How many products the last run created and could still be undone (for the admin button). */
+	public function last_run_undo_count() {
+		return count( $this->products_created_by_run( $this->last_run_token() ) );
+	}
+
+	/** Undo a run's creations: move exactly the products that run CREATED to the Trash. Reversible —
+	 *  nothing is permanently deleted, so a mistaken undo is recoverable from WooCommerce → Kosz.
+	 *  Only ever touches products carrying this run's _wps_created_run tag, so products the run merely
+	 *  updated, and products that pre-dated the plugin, are never affected. $token defaults to the
+	 *  last run. Returns the number trashed. */
+	public function undo_run( $token = 0, $dry_run = false ) {
+		$token = $token ? (int) $token : $this->last_run_token();
+		$ids   = $this->products_created_by_run( $token );
+		if ( ! $ids ) {
+			$this->log( 'info', 'Cofanie synchronizacji: brak produktów utworzonych w tym przebiegu.' );
+			return 0;
+		}
+		if ( $dry_run ) {
+			$this->log( 'info', sprintf( '[DRY] Cofnięcie usunęłoby (do kosza) %d produktów utworzonych w przebiegu %d.', count( $ids ), $token ) );
+			return count( $ids );
+		}
+		$n = 0;
+		foreach ( $ids as $id ) {
+			// Trash, not delete: recoverable. wp_trash_post also trashes child variations.
+			if ( wp_trash_post( (int) $id ) ) {
+				$n++;
+			}
+		}
+		$this->log( 'warning', sprintf( 'Cofnięto synchronizację: %d produktów utworzonych w przebiegu %d przeniesiono do kosza.', $n, $token ) );
+		return $n;
+	}
+
+	/* =====================================================================
+	 *  Scalanie istniejących produktów (adoption) — nadanie _wps_source_id
+	 *  produktom założonym poza wtyczką, by sync je aktualizował zamiast
+	 *  tworzyć duplikaty.
+	 * ================================================================== */
+
+	/** True when a local product is UNCLAIMED — no _wps_source_id yet, so adopting it is safe. */
+	private function is_unclaimed( $local_id ) {
+		return '' === (string) get_post_meta( (int) $local_id, self::META_SOURCE_ID, true );
+	}
+
+	/** Find the single UNCLAIMED local product with this exact name, or 0 if none / ambiguous.
+	 *  Any status (unlike the sync's publish-only name fallback) — an adoption tool should be able
+	 *  to claim a draft the store already had. Uniqueness is required among unclaimed products, so
+	 *  a name shared by several candidates is never guessed. */
+	private function unclaimed_by_name( $name ) {
+		$name = trim( (string) $name );
+		if ( '' === $name ) {
+			return 0;
+		}
+		$ids = get_posts( array(
+			'post_type'      => 'product',
+			'title'          => $name,   // exact match; 'post_title' is not a WP_Query arg (see find_existing_product)
+			'post_status'    => array( 'publish', 'draft', 'pending', 'private' ),
+			'posts_per_page' => -1,
+			'fields'         => 'ids',
+		) );
+		$unclaimed = array_values( array_filter( $ids, array( $this, 'is_unclaimed' ) ) );
+		return count( $unclaimed ) === 1 ? (int) $unclaimed[0] : 0;
+	}
+
+	/** Reconcile the target with the source: stamp _wps_source_id onto EXISTING unclaimed products so
+	 *  future syncs update them instead of creating duplicates.
+	 *
+	 *  Match order per source product: exact SKU, then exactly-one unclaimed product with that name.
+	 *  Never touches a product that already carries _wps_source_id, and never guesses an ambiguous
+	 *  name (0 or >1 candidates) — those are reported for manual handling, not adopted.
+	 *
+	 *  $dry_run (default true) returns the plan and writes nothing. Returns:
+	 *    array( 'adopt' => [ [source_id,local_id,sku,name,how], ... ],
+	 *           'ambiguous' => [ [source_id,sku,name,reason], ... ],
+	 *           'claimed' => N )   // source products already matched to a claimed local (nothing to do) */
+	public function adopt_existing( $dry_run = true ) {
+		$plan = array( 'adopt' => array(), 'ambiguous' => array(), 'claimed' => 0 );
+		$page = 1;
+		$per  = $this->cfg_per_page();
+		do {
+			$batch = $this->api_get( '/wp-json/wc/v3/products', array(
+				'per_page' => $per,
+				'page'     => $page,
+				'status'   => 'any',
+			) );
+			if ( is_wp_error( $batch ) ) {
+				$this->log( 'error', 'Scalanie: błąd pobierania źródła (strona ' . $page . '): ' . $batch->get_error_message() );
+				break;
+			}
+			$count = is_array( $batch ) ? count( $batch ) : 0;
+			foreach ( (array) $batch as $p ) {
+				$src_id = absint( $p['id'] ?? 0 );
+				$sku    = trim( (string) ( $p['sku'] ?? '' ) );
+				$name   = trim( (string) ( $p['name'] ?? '' ) );
+				if ( ! $src_id ) {
+					continue;
+				}
+				// Already claimed by us (by source_id) → nothing to reconcile.
+				if ( self::source_id_to_local( $src_id ) ) {
+					$plan['claimed']++;
+					continue;
+				}
+				$local = 0;
+				$how   = '';
+				if ( '' !== $sku ) {
+					$cand = self::sku_to_id( $sku );
+					if ( $cand && $this->is_unclaimed( $cand ) ) {
+						$local = $cand;
+						$how   = 'SKU';
+					}
+				}
+				if ( ! $local ) {
+					$cand = $this->unclaimed_by_name( $name );
+					if ( $cand ) {
+						$local = $cand;
+						$how   = 'nazwa';
+					}
+				}
+				if ( $local ) {
+					$plan['adopt'][] = array( 'source_id' => $src_id, 'local_id' => $local, 'sku' => $sku, 'name' => $name, 'how' => $how );
+					if ( ! $dry_run ) {
+						update_post_meta( $local, self::META_SOURCE_ID, (string) $src_id );
+					}
+				} else {
+					$plan['ambiguous'][] = array( 'source_id' => $src_id, 'sku' => $sku, 'name' => $name,
+						'reason' => '' === $sku && '' === $name ? 'brak SKU i nazwy' : 'brak jednoznacznego dopasowania na celu' );
+				}
+			}
+			$page++;
+		} while ( $count === $per );
+
+		$this->log( $dry_run ? 'info' : 'warning', sprintf(
+			'%sScalanie: do adopcji %d, wieloznacznych %d, już przypisanych %d.',
+			$dry_run ? '[DRY] ' : '',
+			count( $plan['adopt'] ), count( $plan['ambiguous'] ), $plan['claimed']
+		) );
+		return $plan;
+	}
 
 	private function mark_synced( $product_id ) {
 		update_post_meta( $product_id, self::META_SYNCED, time() );
