@@ -46,6 +46,16 @@ unzip -l "$ZIP"
 BASE_URL="${WPS_UPDATE_BASE_URL:-https://EXAMPLE.invalid/wc-product-sync}"
 REQUIRES="$(grep -m1 -oE 'Requires at least:[[:space:]]*[0-9.]+' "$SLUG.php" | grep -oE '[0-9.]+' || true)"
 REQUIRES_PHP="$(grep -m1 -oE 'Requires PHP:[[:space:]]*[0-9.]+' "$SLUG.php" | grep -oE '[0-9.]+' || true)"
+
+# Release notes for THIS version, straight from CHANGELOG.md, into sections.changelog — this is
+# what WordPress shows in the plugin's "View version details" modal, i.e. what the store owner
+# reads at the moment they decide whether to update. Falls back to a pointer if the section is
+# empty (version not written up yet). python3 does the JSON encoding so any Markdown (quotes,
+# backticks, newlines) is escaped correctly.
+CHANGELOG_MD="$(./scripts/changelog-section.sh "$VERSION" 2>/dev/null || true)"
+[ -n "$CHANGELOG_MD" ] || CHANGELOG_MD="Pełna lista zmian: CHANGELOG.md"
+CHANGELOG_JSON="$(printf '%s' "$CHANGELOG_MD" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+
 cat > dist/update.json <<JSON
 {
   "name": "WC Product Sync (SKU)",
@@ -59,8 +69,11 @@ cat > dist/update.json <<JSON
   "last_updated": "$(date -u +%F)",
   "download_url": "$BASE_URL/$SLUG-$VERSION.zip",
   "sections": {
-    "changelog": "Pełna lista zmian znajduje się w CHANGELOG.md (plik głównego repozytorium)."
+    "changelog": $CHANGELOG_JSON
   }
 }
 JSON
+# Validate: a broken update.json means every store's update check silently fails.
+python3 -c 'import json,sys; json.load(open("dist/update.json"))' \
+	|| { echo "ERROR: generated dist/update.json is not valid JSON" >&2; exit 1; }
 echo "Wrote dist/update.json  →  download_url: $BASE_URL/$SLUG-$VERSION.zip"

@@ -22,6 +22,11 @@
   jest już po cichu pomijany (co dla `variable` znaczyło przebudowę **bez atrybutów**). Produkt jest
   **pomijany i raportowany jako błąd**, a jego dane zostają nietknięte.
 
+- **Nieodwzorowana wariacja to teraz błąd, nie ciche pominięcie.** Wariacja, której atrybutu
+  globalnego nie dało się odwzorować, była pomijana z logiem `warning`, a przebieg meldował
+  `błędy=0` — produkt zmienny wychodził bez wariacji, wyglądając na czysty sync. Teraz rodzic jest
+  liczony jako błąd, a powód trafia do raportu.
+
 ### 0.9.26 — czytelny błąd przy braku dostępu do atrybutów globalnych
 
 - **Powód przerwania przebiegu widać wreszcie w adminie.** Gdy nie udało się pobrać

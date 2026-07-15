@@ -46,3 +46,20 @@ jobs:
           v="$(grep -m1 -oE 'Version:[[:space:]]*[0-9.]+' wc-product-sync.php | grep -oE '[0-9.]+')"
           [ -n "$v" ] || { echo "::error::no Version in plugin header"; exit 1; }
           echo "version=$v"
+
+      # update.json's changelog must be the real notes for this version, not the "see CHANGELOG.md"
+      # pointer — that field is what the store owner reads in the WP update modal. And it must be
+      # valid JSON, or every store's update check silently fails.
+      - name: update.json carries real release notes
+        run: |
+          python3 - <<'PY'
+          import json
+          v = None
+          for line in open("wc-product-sync.php"):
+              if "Version:" in line:
+                  import re; v = re.search(r"Version:\s*([0-9][0-9A-Za-z.-]*)", line).group(1); break
+          c = json.load(open("dist/update.json"))["sections"]["changelog"]
+          assert c.strip().startswith(f"### {v}"), f"changelog does not open with the {v} section: {c[:60]!r}"
+          assert "CHANGELOG.md" not in c[:40], "changelog is still a pointer, not the real notes"
+          print(f"ok: update.json changelog is the {v} section ({len(c)} chars)")
+          PY

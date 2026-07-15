@@ -82,14 +82,21 @@ release_id() {
 
 ensure_release() { # ensure_release TAG NAME BODY PRERELEASE -> id
 	local tag="$1" name="$2" body="$3" pre="$4" id
-	id="$(release_id "$tag")"
-	if [ -n "$id" ]; then echo "$id"; return 0; fi
 	python3 - "$tag" "$name" "$body" "$pre" "$COMMIT" >/tmp/wps-rel.json <<'PY'
 import json,sys
 tag,name,body,pre,commit = sys.argv[1:6]
 json.dump({"tag_name":tag,"target_commitish":commit,"name":name,"body":body,
            "draft":False,"prerelease":pre=="true"}, sys.stdout)
 PY
+	id="$(release_id "$tag")"
+	if [ -n "$id" ]; then
+		# Already exists — PATCH the body so a re-publish refreshes the notes rather than leaving
+		# the first run's text frozen. (name/body may have changed since; the assets are handled
+		# separately by upload_asset.)
+		api PATCH "/releases/$id" -H 'Content-Type: application/json' --data-binary @/tmp/wps-rel.json >/dev/null
+		echo "$id"
+		return 0
+	fi
 	api POST "/releases" -H 'Content-Type: application/json' --data-binary @/tmp/wps-rel.json | jget id
 }
 
@@ -152,8 +159,13 @@ WPS_UPDATE_BASE_URL="$DL_BASE" ./build.sh >/dev/null
 ZIP="dist/$SLUG-$VERSION.zip"
 [ -f "$ZIP" ] && [ -f dist/update.json ] || { echo "ERROR: build produced no artifacts" >&2; exit 1; }
 
+# Release body = this version's CHANGELOG.md section, so the Forgejo release page shows the real
+# notes rather than "WC Product Sync X.Y.Z". Same source as update.json's changelog — written once.
+NOTES="$(./scripts/changelog-section.sh "$VERSION" 2>/dev/null || true)"
+[ -n "$NOTES" ] || NOTES="WC Product Sync $VERSION"
+
 echo "==> Versioned release $TAG (channels: $CHANNELS)"
-VER_ID="$(ensure_release "$TAG" "$TAG" "WC Product Sync $VERSION" "$PRERELEASE")"
+VER_ID="$(ensure_release "$TAG" "$TAG" "$NOTES" "$PRERELEASE")"
 [ -n "$VER_ID" ] || { echo "ERROR: could not create/find release $TAG" >&2; exit 1; }
 upload_asset "$VER_ID" "$ZIP" "$SLUG-$VERSION.zip"
 upload_asset "$VER_ID" dist/update.json update.json
