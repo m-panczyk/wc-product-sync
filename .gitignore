@@ -8,6 +8,7 @@ metrics/*.csv
 
 # Docs/notes stay local; only READMEs and the shipped perf doc are tracked
 *.md
+!CHANGELOG.md
 !README.md
 !**/README.md
 !docs/PERFORMANCE.md
