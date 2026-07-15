@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.27-rc1
+ * Version:           0.9.27-rc2
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -56,6 +56,8 @@ final class WC_Product_Sync {
 	 *  metadata pointer — the ZIP it names is an immutable versioned release. Define the constant
 	 *  to point elsewhere, or to '' to switch the updater off entirely. */
 	const DEFAULT_UPDATE_URL   = 'https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/latest/update.json';
+	/** Prerelease (release-candidate) channel, selected by the 'update_channel' = 'rc' setting. */
+	const RC_UPDATE_URL        = 'https://git.panczyk.cc/mpanczyk/wc-product-sync/releases/download/latest-beta/update.json';
 
 	// Soft-delete
 	const META_SYNCED       = '_wps_synced';
@@ -527,6 +529,9 @@ $defaults = array(
 		'cron_hour'           => 3,
 		'cron_minute'         => 0,
 		'force_full_sync'     => 0,
+		// Update channel: 'stable' (latest) or 'rc' (latest-beta). Overridden by the
+		// WC_PRODUCT_SYNC_UPDATE_URL constant when it is defined.
+		'update_channel'      => 'stable',
 		// What to sync (defaults preserve legacy behaviour: everything, publish only).
 		'sync_types'          => array( 'simple', 'variable', 'grouped' ),
 		'sync_statuses'       => array( 'publish' ),
@@ -672,6 +677,15 @@ $defaults = array(
 		}
 		$dm = isset( $input['deletion_mode'] ) ? $input['deletion_mode'] : 'none';
 		$out['deletion_mode']   = in_array( $dm, array( 'none', 'soft', 'hard' ), true ) ? $dm : 'none';
+		$uc = isset( $input['update_channel'] ) ? $input['update_channel'] : 'stable';
+		$out['update_channel']  = in_array( $uc, array( 'stable', 'rc' ), true ) ? $uc : 'stable';
+		// Switching channel must take effect now, not after the 12h metadata cache — drop it so the
+		// next admin load re-checks against the newly selected channel.
+		$prev_channel = $this->get_options()['update_channel'] ?? 'stable';
+		if ( $out['update_channel'] !== $prev_channel ) {
+			delete_transient( self::UPDATE_TRANSIENT );
+			delete_site_transient( 'update_plugins' );
+		}
 		if ( isset( $input['hard_delete_max'] ) ) {
 			$out['hard_delete_max'] = max( 0, (int) $input['hard_delete_max'] );
 		}
@@ -1100,6 +1114,21 @@ $defaults = array(
 							<input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[hard_delete_max]" id="wps_hdm" type="number" min="0" class="small-text"
 								value="<?php echo esc_attr( $opts['hard_delete_max'] ); ?>" />
 							<p class="description"><?php esc_html_e( 'Bezpiecznik trybu „Trwałe usunięcie": maks. produktów usuwanych w jednym przebiegu. Chroni przed skasowaniem całego katalogu przy chwilowym błędzie źródła. 0 = bez limitu.', 'wc-product-sync' ); ?></p>
+						</td>
+					</tr>
+					<?php $wps_ch = $opts['update_channel'] ?? 'stable'; $wps_ch_locked = defined( 'WC_PRODUCT_SYNC_UPDATE_URL' ); ?>
+					<tr>
+						<th scope="row"><label for="wps_channel"><?php esc_html_e( 'Kanał aktualizacji', 'wc-product-sync' ); ?></label></th>
+						<td>
+							<select name="<?php echo esc_attr( self::OPTION_KEY ); ?>[update_channel]" id="wps_channel" <?php disabled( $wps_ch_locked ); ?>>
+								<option value="stable" <?php selected( $wps_ch, 'stable' ); ?>><?php esc_html_e( 'Stabilny (zalecany)', 'wc-product-sync' ); ?></option>
+								<option value="rc" <?php selected( $wps_ch, 'rc' ); ?>><?php esc_html_e( 'Testowy (RC) — może zawierać błędy, nie na produkcję', 'wc-product-sync' ); ?></option>
+							</select>
+							<?php if ( $wps_ch_locked ) : ?>
+								<p class="description"><?php esc_html_e( 'Wyłączone: adres aktualizacji jest ustawiony stałą WC_PRODUCT_SYNC_UPDATE_URL w wp-config.php, która ma pierwszeństwo nad tym wyborem.', 'wc-product-sync' ); ?></p>
+							<?php else : ?>
+								<p class="description"><?php esc_html_e( 'Stabilny pobiera wydania produkcyjne. Testowy (RC) pobiera kandydatów do wydania — do sprawdzenia przed publikacją, nie na sklep produkcyjny. Zmiana kanału odświeża sprawdzanie aktualizacji od razu.', 'wc-product-sync' ); ?></p>
+							<?php endif; ?>
 						</td>
 					</tr>
 				</table>
@@ -3286,7 +3315,13 @@ $defaults = array(
 	 *  or via the `wps_update_url` filter. An empty value disables the updater completely: no
 	 *  requests are made and every update filter becomes a no-op. */
 	private function update_url() {
-		$url = defined( 'WC_PRODUCT_SYNC_UPDATE_URL' ) ? WC_PRODUCT_SYNC_UPDATE_URL : self::DEFAULT_UPDATE_URL;
+		if ( defined( 'WC_PRODUCT_SYNC_UPDATE_URL' ) ) {
+			// Explicit override (own server, or '' to disable) always wins over the channel setting.
+			$url = WC_PRODUCT_SYNC_UPDATE_URL;
+		} else {
+			$channel = ( $this->get_options()['update_channel'] ?? 'stable' );
+			$url     = ( 'rc' === $channel ) ? self::RC_UPDATE_URL : self::DEFAULT_UPDATE_URL;
+		}
 		return trim( (string) apply_filters( 'wps_update_url', $url ) );
 	}
 
