@@ -1,5 +1,22 @@
 ## Zmiany (Changelog)
 
+### 0.9.28 (current) — scalanie, cofanie synchronizacji, [krytyczne] naprawa dopasowania po nazwie
+
+- **[krytyczne] Dopasowanie po nazwie nigdy nie działało.** `find_existing_product()` używało
+  `get_posts( "post_title" => ... )`, a WP_Query **nie zna** parametru `post_title` (poprawny to
+  `title`) — filtr był po cichu ignorowany. Skutki: przy **jednym** kandydacie na celu każdy
+  niedopasowany produkt źródła fałszywie „dopasowywał się" do niego (**nadpisanie złego produktu**);
+  przy **wielu** — zapytanie zawsze widziało 2 i nigdy nie dopasowywało, więc produkty bez zgodnego
+  SKU lądowały jako **duplikaty**. Naprawione (`title`), zweryfikowane e2e.
+- **Scalanie istniejących produktów** (`adopt_existing`) — nadaje produktom założonym poza wtyczką
+  znacznik `_wps_source_id` po SKU lub **jednoznacznej nazwie**, dzięki czemu kolejna synchronizacja je
+  **aktualizuje zamiast tworzyć duplikaty**. Przycisk **„Scal istniejące — podgląd"** pokazuje plan
+  (co z czym, wieloznaczne osobno) przed zapisem; nic nie rusza produktów już przypisanych.
+- **Cofanie ostatniej synchronizacji** (`undo_run`) — przenosi do **kosza** (odwracalnie) produkty
+  **utworzone** w ostatnim przebiegu; nie rusza zaktualizowanych ani starych sklepowych. Produkty są
+  znakowane `_wps_created_run` przy tworzeniu; dla przebiegów sprzed tej wersji działa fallback po
+  `_wps_source_id` + dacie utworzenia. Przycisk **„Cofnij ostatnią synchronizację (N)"**.
+
 ### 0.9.27 (current) — `/products/attributes` nie jest już w ogóle wołany
 
 - **Endpoint atrybutów przestał być wymagany.** WooCommerce pilnuje `/products/attributes`
