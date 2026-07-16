@@ -670,5 +670,88 @@ echo "    rounds=$R9 adopt=$ADOPTN9 preview=$PREV9"
 [ "$ADOPTN9" -ge 1 ] && [ "$PREV9" -ge 1 ] || { echo "  FAIL: adopt background produced no plan ($ADOPTN9/$PREV9)" >&2; exit 1; }
 echo "  PASS: adopt split into $R9 rounds, planned $ADOPTN9 adoption(s)"
 
+# --- Phase 10: total sync mirrors the source (adopt + hard-delete everything not on source) --
+#
+# Total sync = make the target a MIRROR of the source: (1) adopt existing products by SKU + name,
+# (2) sync the whole source, (3) HARD-delete every target product the source lacks — including
+# products created by another tool (never synced), which a normal sync leaves alone. It must force
+# force_full + hard delete regardless of the saved settings, and must refuse to run on an empty
+# source (that would wipe the shop).
+echo "==> Phase 10: total sync mirrors the source (hard-deletes what the source lacks)"
+opt per_page 10
+opt sync_batch_limit 100
+opt max_batch_seconds 0
+opt force_full_sync 0        # OFF on purpose: total sync must force full sync itself
+opt deletion_mode none       # OFF on purpose: total sync must force hard delete itself
+
+# Source: exactly 3 products.
+swp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+foreach ( array("S1"=>"Mirror A","S2"=>"Mirror B","S3"=>"Mirror C") as $sku=>$name ) {
+  $p=new WC_Product_Simple(); $p->set_name($name); $p->set_sku($sku); $p->set_regular_price("50"); $p->set_status("publish"); $p->save();
+}' >/dev/null
+
+# Target: S1 by SKU (updates), "Mirror B" with a DIFFERENT SKU (adopted by name — must not duplicate),
+# and two FOREIGN extras with no source match and no plugin meta (must be hard-deleted by the mirror).
+twp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$a=new WC_Product_Simple(); $a->set_name("Mirror A"); $a->set_sku("S1");       $a->set_regular_price("1"); $a->set_status("publish"); $a->save();
+$b=new WC_Product_Simple(); $b->set_name("Mirror B"); $b->set_sku("TGT-DIFF"); $b->set_regular_price("1"); $b->set_status("publish"); $b->save();
+$e1=new WC_Product_Simple(); $e1->set_name("EXTRA One"); $e1->set_sku("EXTRA-1"); $e1->set_regular_price("1"); $e1->set_status("publish"); $e1->save();
+$e2=new WC_Product_Simple(); $e2->set_name("EXTRA Two"); $e2->set_sku("EXTRA-2"); $e2->set_regular_price("1"); $e2->set_status("publish"); $e2->save();' >/dev/null
+
+# Remember the pre-existing "Mirror B" product ID: the mirror must UPDATE this exact product in place
+# (adopted by name), not delete it and recreate a fresh one. After the run it carries the source's SKU
+# (S2) and price (50), so it can only be found again by ID or title — its old SKU is gone.
+PRE_B_ID="$(twp eval 'echo (int) wc_get_product_id_by_sku("TGT-DIFF");')"
+
+# Guard: the source counter (used by handle_total_sync to refuse an empty/broken source) sees all 3.
+SRCN="$(twp eval '$s=WC_Product_Sync::instance();$m=new ReflectionMethod("WC_Product_Sync","source_product_count");$m->setAccessible(true);echo (int)$m->invoke($s);')"
+[ "$SRCN" -eq 3 ] || { echo "  FAIL: source_product_count=$SRCN, expected 3" >&2; exit 1; }
+
+# Orchestrate exactly as handle_total_sync does, all in ONE process to avoid racing the real WP-Cron
+# loopback (spawn_cron in start_mirror_sync fires an async run that would otherwise clear the progress
+# transient before a second CLI call could observe it): adopt(apply=true, total=true) batched to
+# completion chains start_mirror_sync, which seeds the progress transient WITH total=1; then drive
+# that seeded mirror to completion in-process. We must NOT delete the progress transient (that would
+# strip the total flag and downgrade the run to a normal, non-deleting sync), so we drive it directly
+# instead of using drive().
+SEEDED="$(twp eval '
+$s=WC_Product_Sync::instance();
+delete_transient("wps_adopt_state"); delete_transient("wps_adopt_preview"); delete_option("wps_adopt_result"); delete_transient("wps_sync_progress");
+$reset=new ReflectionMethod("WC_Product_Sync","adopt_reset");$reset->setAccessible(true);$reset->invoke($s,true,true);
+update_option("wps_adopt_result",array("running"=>1,"apply"=>1,"total"=>1),false);
+$ev=new ReflectionMethod("WC_Product_Sync","run_adopt_event");$ev->setAccessible(true);
+$g=0; do { $g++; if($g>60)break; $ev->invoke($s); $res=get_option("wps_adopt_result"); } while ( is_array($res)&&!empty($res["running"]) );
+$seeded = get_transient("wps_sync_progress") ? "yes" : "no";
+$cron=new ReflectionMethod("WC_Product_Sync","run_sync_cron");$cron->setAccessible(true);
+$resume=new ReflectionMethod("WC_Product_Sync","run_resume_batch");$resume->setAccessible(true);
+$prog=get_transient("wps_sync_progress");
+if ( is_array($prog) ) {
+  if ( (int)($prog["current_page"]??0) < 1 ) { $cron->invoke($s); }
+  $b=0; while ( get_transient("wps_sync_progress") ) { if(++$b>60)break; $resume->invoke($s); }
+}
+echo $seeded;')"
+[ "$SEEDED" = "yes" ] || { echo "  FAIL: adopt completion did not seed the mirror sync (total flag lost)" >&2; exit 1; }
+
+TOT_N="$(twp eval 'echo count( get_posts( array( "post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) );')"
+EXTRA_ANY="$(twp eval '$n=0; foreach(array("EXTRA-1","EXTRA-2") as $sk){ if(wc_get_product_id_by_sku($sk)) $n++; } echo $n;')"
+EXTRA_TRASH="$(twp eval '$n=0; foreach(get_posts(array("post_type"=>"product","post_status"=>"trash","numberposts"=>-1,"fields"=>"ids")) as $id){ $p=wc_get_product($id); if($p && in_array($p->get_sku(),array("EXTRA-1","EXTRA-2"),true)) $n++; } echo $n;')"
+MIRRORB_N="$(twp eval 'echo count( get_posts( array( "post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Mirror B" ) ) );')"
+# Same product ID as before (adopted+updated in place), now carrying the source SKU S2 and price 50.
+MIRRORB_PRICE="$(twp eval '$p=wc_get_product('"$PRE_B_ID"'); echo $p?$p->get_regular_price():"gone";')"
+MIRRORB_SKU="$(twp eval '$p=wc_get_product('"$PRE_B_ID"'); echo $p?($p->get_sku()?:"-"):"gone";')"
+echo "    after total sync: products=$TOT_N  extras_remaining=$EXTRA_ANY  extras_in_trash=$EXTRA_TRASH  MirrorB_count=$MIRRORB_N  adopted#$PRE_B_ID: sku=$MIRRORB_SKU price=$MIRRORB_PRICE"
+
+FAIL10=0
+[ "$TOT_N" -eq 3 ]        || { echo "  FAIL: target has $TOT_N products, expected exactly 3 (mirror of source)" >&2; FAIL10=1; }
+[ "$EXTRA_ANY" -eq 0 ]    || { echo "  FAIL: $EXTRA_ANY foreign extra(s) survived the mirror (must be deleted)" >&2; FAIL10=1; }
+[ "$EXTRA_TRASH" -eq 0 ]  || { echo "  FAIL: extras were soft-deleted to Trash, not HARD-deleted ($EXTRA_TRASH in trash)" >&2; FAIL10=1; }
+[ "$MIRRORB_N" -eq 1 ]    || { echo "  FAIL: 'Mirror B' count=$MIRRORB_N (adopt-by-name should prevent a duplicate)" >&2; FAIL10=1; }
+[ "$MIRRORB_SKU" = "S2" ] || { echo "  FAIL: adopted product #$PRE_B_ID not updated in place (sku=$MIRRORB_SKU, expected S2)" >&2; FAIL10=1; }
+[ "$MIRRORB_PRICE" = "50" ] || { echo "  FAIL: adopted 'Mirror B' not updated from source (price=$MIRRORB_PRICE, expected 50)" >&2; FAIL10=1; }
+[ "$FAIL10" -eq 0 ] || exit 1
+echo "  PASS: target mirrors source (3 products), foreign extras hard-deleted, adopted product updated (no duplicate)"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync)"
