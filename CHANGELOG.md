@@ -1,7 +1,14 @@
 ## Zmiany (Changelog)
 
-### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, [krytyczne] naprawa dopasowania po nazwie
+### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, total sync, [krytyczne] naprawa dopasowania po nazwie
 
+- **Total sync (lustro źródła).** Nowy, oddzielny przycisk w sekcji „Uruchomienie ręczne", który robi
+  sklep **lustrem źródła**: (1) scala istniejące produkty po **SKU i nazwie**, (2) synchronizuje cały
+  katalog źródła, (3) **twardo usuwa** (bez kosza) każdy produkt na celu, którego nie ma na źródle.
+  Uruchamia się **tylko gdy źródło udostępnia > 0 produktów** (mirror pustego/niedostępnego źródła
+  wykasowałby cały sklep — zablokowane; ta sama ochrona działa też, jeśli źródło padnie w trakcie).
+  Wtyczka **nie robi kopii** — wymaga potwierdzenia „mam własną kopię bazy" i podwójnego potwierdzenia
+  (zalecany wcześniej podgląd scalania). Całość chodzi **w tle i batchowo**. Zweryfikowane e2e.
 - **[krytyczne] Symulacja i scalanie nie przekraczają już limitu czasu serwera.** Dry run i „Scal
   istniejące" robiły całą robotę w jednym żądaniu — na dużym katalogu mod_fcgid ubijał je po swoim
   limicie (na niektórych hostingach 31 s) i zwracał **500 Internal Server Error**. Obie operacje

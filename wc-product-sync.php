@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.27-rc3
+ * Version:           0.9.27-rc4
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -117,6 +117,9 @@ final class WC_Product_Sync {
 	 *  progress transient (like $fast_mode), so a backgrounded dry run stays a simulation on every
 	 *  batch instead of writing on a resume. */
 	private $dry_mode = false;
+	/** "Total sync" (mirror-the-source) run: for THIS run only, force force_full + hard delete,
+	 *  regardless of the saved settings. Carried across batches in the progress transient. */
+	private $total_sync = false;
 	/** Ostatnie nagłówki odpowiedzi REST API (X-WP-TotalPages) */
 	private $last_api_headers = array();
 
@@ -135,6 +138,7 @@ final class WC_Product_Sync {
 		add_action( 'admin_post_wc_product_sync_step', array( $this, 'handle_step_sync' ) );
 		add_action( 'admin_post_wc_product_sync_undo', array( $this, 'handle_undo' ) );
 		add_action( 'admin_post_wc_product_sync_adopt', array( $this, 'handle_adopt' ) );
+		add_action( 'admin_post_wc_product_sync_total', array( $this, 'handle_total_sync' ) );
 		add_action( self::ADOPT_HOOK, array( $this, 'run_adopt_event' ) );
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
 		add_action( self::RESUME_HOOK, array( $this, 'run_resume_batch' ) );
@@ -286,6 +290,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			'updated_at'       => time(),                   // Heartbeat — used to detect a stalled/no-cron sync
 			'fast'             => $this->fast_mode ? 1 : 0, // Resume batches must keep fast (field-refresh) mode
 			'dry'              => $this->dry_mode ? 1 : 0,  // Resume batches must stay a simulation
+			'total'            => $this->total_sync ? 1 : 0, // Resume batches must keep mirror (force_full+hard)
 		), 3600 ); // Persist for 1 hour (enough for all batches to finish)
 	}
 
@@ -308,6 +313,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			'started_at'         => time(),
 			'updated_at'         => time(),
 			'dry'                => $this->dry_mode ? 1 : 0,
+			'total'              => $this->total_sync ? 1 : 0,
 		), 3600 );
 	}
 
@@ -435,8 +441,9 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 		}
 		// Restore fast (field-refresh) mode for this batch so a multi-batch fast sync stays
 		// update-only/restricted-fields across resumes instead of falling back to a full sync.
-		$this->fast_mode = ! empty( $progress['fast'] );
-		$this->dry_mode  = ! empty( $progress['dry'] ); // keep a backgrounded dry run a simulation on resume
+		$this->fast_mode  = ! empty( $progress['fast'] );
+		$this->dry_mode   = ! empty( $progress['dry'] );  // keep a backgrounded dry run a simulation on resume
+		$this->total_sync = ! empty( $progress['total'] ); // keep mirror (force_full+hard) across resume
 
 		// Check if a manual sync is already running (Codex #6 fix: sync lock)
 		$lock = get_transient( self::SYNC_LOCK_TRANSIENT );
@@ -626,7 +633,18 @@ $defaults = array(
 		if ( $this->fast_mode ) {
 			return false; // fast field-refresh never creates or deletes products
 		}
+		if ( $this->total_sync ) {
+			return true; // mirror always deletes what the source no longer has
+		}
 		return 'none' !== ( $this->get_options()['deletion_mode'] ?? 'none' );
+	}
+
+	/** Effective deletion mode for THIS run: hard when mirroring, else the saved setting. */
+	private function effective_deletion_mode() {
+		if ( $this->total_sync ) {
+			return 'hard';
+		}
+		return ( 'hard' === ( $this->get_options()['deletion_mode'] ?? 'none' ) ) ? 'hard' : 'soft';
 	}
 
 	/** N1: HTTP source on a public host leaks the Basic-auth API keys in cleartext.
@@ -913,6 +931,31 @@ $defaults = array(
 						? esc_html__( 'Scalanie uruchomione w tle. Odśwież stronę za chwilę — wynik pojawi się poniżej.', 'wc-product-sync' )
 						: esc_html__( 'Podgląd scalania uruchomiony w tle. Odśwież stronę za chwilę — plan pojawi się poniżej.', 'wc-product-sync' ); ?>
 				</p></div>
+			<?php elseif ( isset( $_GET['total_started'] ) ) : ?>
+				<div class="notice notice-warning is-dismissible"><p>
+					<?php esc_html_e( 'Total sync uruchomiony w tle: najpierw scalanie (dopasowanie po SKU i nazwie), potem synchronizacja lustrzana z TWARDYM usunięciem produktów, których nie ma na źródle. Odświeżaj stronę, aby śledzić postęp.', 'wc-product-sync' ); ?>
+				</p></div>
+			<?php elseif ( isset( $_GET['total_error'] ) ) : ?>
+				<div class="notice notice-error is-dismissible"><p>
+					<?php
+					switch ( $_GET['total_error'] ) {
+						case 'backup':
+							esc_html_e( 'Total sync przerwany: musisz potwierdzić, że masz własną kopię zapasową bazy danych. Wtyczka NIE robi kopii.', 'wc-product-sync' );
+							break;
+						case 'busy':
+							esc_html_e( 'Total sync przerwany: inna synchronizacja lub scalanie już trwa. Poczekaj na zakończenie.', 'wc-product-sync' );
+							break;
+						case 'source_empty':
+							esc_html_e( 'Total sync przerwany: źródło nie udostępnia żadnych produktów. Mirror wykasowałby cały sklep — anulowano.', 'wc-product-sync' );
+							break;
+						case 'source_err':
+							esc_html_e( 'Total sync przerwany: nie udało się pobrać liczby produktów ze źródła (błąd połączenia/uprawnień). Sprawdź konfigurację i spróbuj ponownie.', 'wc-product-sync' );
+							break;
+						default:
+							esc_html_e( 'Total sync przerwany.', 'wc-product-sync' );
+					}
+					?>
+				</p></div>
 			<?php endif; ?>
 
 			<?php
@@ -1190,6 +1233,11 @@ $defaults = array(
 						<div class="notice notice-success"><p>
 							<?php printf( esc_html__( 'Scalono: %d istniejących produktów oznaczono jako powiązane ze źródłem. Następna synchronizacja je zaktualizuje zamiast tworzyć duplikaty.', 'wc-product-sync' ), (int) $adopt_res['adopt'] ); ?>
 						</p></div>
+						<?php if ( ! empty( $adopt_res['mirror_skipped'] ) ) : ?>
+							<div class="notice notice-error"><p>
+								<?php esc_html_e( 'Total sync: faza lustrzana (usuwanie brakujących) NIE ruszyła, bo inna synchronizacja była w toku. Scalanie się wykonało — uruchom „Total sync" ponownie, gdy druga synchronizacja się zakończy.', 'wc-product-sync' ); ?>
+							</p></div>
+						<?php endif; ?>
 					<?php else :
 						$plan = get_transient( 'wps_adopt_preview' );
 						if ( is_array( $plan ) ) :
@@ -1222,6 +1270,33 @@ $defaults = array(
 						<?php endif; ?>
 					<?php endif; ?>
 				<?php endif; ?>
+
+				<hr />
+				<h3 style="color:#b32d2e"><?php esc_html_e( 'Total sync — lustro źródła (nieodwracalne)', 'wc-product-sync' ); ?></h3>
+				<div style="border:1px solid #b32d2e;border-left-width:4px;background:#fcf0f1;padding:12px 16px;max-width:60em">
+					<p style="margin-top:0">
+						<strong><?php esc_html_e( 'Uwaga: to nadpisuje sklep obrazem źródła.', 'wc-product-sync' ); ?></strong>
+						<?php esc_html_e( 'Kolejno: (1) scala istniejące produkty po SKU i nazwie, (2) synchronizuje wszystkie produkty ze źródła, (3) TWARDO usuwa (bez kosza) każdy produkt na celu, którego nie ma na źródle. Działa tylko, gdy źródło udostępnia więcej niż zero produktów.', 'wc-product-sync' ); ?>
+					</p>
+					<p>
+						<?php esc_html_e( 'Wtyczka NIE robi kopii zapasowej. Przed uruchomieniem zrób własny zrzut bazy danych (i katalogu uploads, jeśli używasz obrazów). Zalecane: najpierw „Scal istniejące — podgląd", aby zobaczyć, co zostanie dopasowane.', 'wc-product-sync' ); ?>
+					</p>
+					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"
+						onsubmit="return confirm('<?php echo esc_js( __( 'OSTATNIE OSTRZEŻENIE: total sync TWARDO usunie wszystkie produkty na celu, których nie ma na źródle. Tej operacji nie da się cofnąć bez kopii bazy. Kontynuować?', 'wc-product-sync' ) ); ?>');">
+						<input type="hidden" name="action" value="wc_product_sync_total" />
+						<?php wp_nonce_field( self::NONCE_ACTION . '_total' ); ?>
+						<p><label>
+							<input type="checkbox" name="wps_backup_ack" value="1"
+								onchange="document.getElementById('wps-total-go').disabled = ! this.checked;" />
+							<?php esc_html_e( 'Mam własną kopię zapasową bazy danych i rozumiem, że usunięcie jest nieodwracalne.', 'wc-product-sync' ); ?>
+						</label></p>
+						<p>
+							<button type="submit" id="wps-total-go" class="button" disabled
+								style="background:#b32d2e;border-color:#b32d2e;color:#fff">
+								<?php esc_html_e( 'Uruchom total sync (lustro źródła)', 'wc-product-sync' ); ?></button>
+						</p>
+					</form>
+				</div>
 			<?php endif; ?>
 			<p class="description">
 				<?php printf( esc_html__( 'Logi: %s', 'wc-product-sync' ), '<a href="' . esc_url( admin_url( 'admin.php?page=wc-status&tab=logs' ) ) . '">WooCommerce → Status → Logi</a>' ); ?>
@@ -1366,6 +1441,90 @@ $defaults = array(
 		exit;
 	}
 
+	/**
+	 * Total sync (mirror the source). Sequence, all backgrounded and batched:
+	 *   1. require the "I have a DB backup" confirmation (the plugin does NOT back up — hard delete),
+	 *   2. guard: the source must expose > 0 products (never mirror an empty/broken source over the shop),
+	 *   3. adopt (apply): match by SKU + name so shared products are UPDATED, not deleted,
+	 *   4. on adopt completion, chain into the mirror sync (force_full + hard delete) which removes
+	 *      whatever the source no longer has.
+	 * The double confirmation (preview + typed intent) lives in the admin form/JS; this handler is the
+	 * point of no return, so it re-checks the backup acknowledgement server-side.
+	 */
+	public function handle_total_sync() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( esc_html__( 'Brak uprawnień.', 'wc-product-sync' ) );
+		}
+		check_admin_referer( self::NONCE_ACTION . '_total' );
+
+		// The plugin does not make a backup — this is a hard, irreversible delete of everything the
+		// source no longer has. Refuse unless the operator confirms they hold their own DB backup.
+		if ( empty( $_POST['wps_backup_ack'] ) ) {
+			wp_safe_redirect( add_query_arg(
+				array( 'page' => 'wc-product-sync', 'total_error' => 'backup' ),
+				admin_url( 'admin.php' )
+			) );
+			exit;
+		}
+
+		// Refuse to run if another sync/adopt is already in flight.
+		if ( false !== get_transient( self::SYNC_PROGRESS_TRANSIENT )
+			|| ( is_array( get_option( self::ADOPT_RESULT ) ) && ! empty( get_option( self::ADOPT_RESULT )['running'] ) ) ) {
+			wp_safe_redirect( add_query_arg(
+				array( 'page' => 'wc-product-sync', 'total_error' => 'busy' ),
+				admin_url( 'admin.php' )
+			) );
+			exit;
+		}
+
+		// Guard: the source must actually have products. Mirroring an empty (or unreachable) source
+		// would hard-delete the whole target catalog — exactly the disaster this check prevents.
+		$src_count = $this->source_product_count();
+		if ( $src_count < 1 ) {
+			wp_safe_redirect( add_query_arg(
+				array( 'page' => 'wc-product-sync', 'total_error' => is_wp_error( $src_count ) ? 'source_err' : 'source_empty' ),
+				admin_url( 'admin.php' )
+			) );
+			exit;
+		}
+
+		// Start the adopt phase in apply mode with the total flag; run_adopt_event chains the mirror
+		// sync once every product is linked.
+		$this->adopt_reset( true, true );
+		delete_transient( 'wps_adopt_preview' );
+		update_option( self::ADOPT_RESULT, array( 'running' => 1, 'apply' => 1, 'total' => 1 ), false );
+		wp_schedule_single_event( time(), self::ADOPT_HOOK );
+		spawn_cron();
+		wp_safe_redirect( add_query_arg(
+			array( 'page' => 'wc-product-sync', 'total_started' => 1 ),
+			admin_url( 'admin.php' )
+		) );
+		exit;
+	}
+
+	/** Count products the source exposes to these credentials. Returns an int (0 if none/hidden by
+	 *  permissions) or a WP_Error on transport failure — the caller must NOT treat an error as empty.
+	 *  The only decision that rides on this is "empty vs non-empty" (the total-sync guard), so when the
+	 *  X-WP-Total header is stripped by a proxy the per_page=1 body is enough: 0 rows → 0, ≥1 row → ≥1,
+	 *  which is all the guard needs. The exact figure only matters when the header is present. */
+	private function source_product_count() {
+		$body = $this->api_get( '/wp-json/wc/v3/products', array( 'per_page' => 1, 'status' => 'any' ) );
+		if ( is_wp_error( $body ) ) {
+			return $body;
+		}
+		$total = 0;
+		if ( isset( $this->last_api_headers['X-WP-Total'] ) ) {
+			$total = absint( $this->last_api_headers['X-WP-Total'] );
+		} elseif ( isset( $this->last_api_headers['x-wp-total'] ) ) {
+			$total = absint( $this->last_api_headers['x-wp-total'] );
+		}
+		if ( $total > 0 ) {
+			return $total;
+		}
+		// Header missing/zeroed on some hosts — fall back to counting the returned body.
+		return is_array( $body ) ? count( $body ) : 0;
+	}
+
 	/** Fallback when WP-Cron isn't firing: run the pending batch synchronously in this request.
 	 *  Blocks for one batch (user-initiated), then redirects back to watch/continue. */
 	public function handle_step_sync() {
@@ -1404,7 +1563,8 @@ $defaults = array(
 			return;
 		}
 		// A seeded dry run schedules THIS hook too; honor its flag so the first batch simulates.
-		$this->dry_mode = ! empty( $prog['dry'] );
+		$this->dry_mode   = ! empty( $prog['dry'] );
+		$this->total_sync = ! empty( $prog['total'] );
 		$this->run_sync( $this->dry_mode );
 	}
 
@@ -1619,7 +1779,8 @@ $defaults = array(
 		// więc BEZ warunku $is_first_batch — z nim dla katalogów dzielonych na batche kasacja nigdy
 		// by się nie wykonała (koniec przypada na batch wznowienia, gdzie is_first_batch=false).
 		// Sama kasacja jest dodatkowo bramkowana brakiem błędu pobierania (patrz niżej).
-		$force_full = ! empty( $this->get_options()['force_full_sync'] ) && ! $this->fast_mode;
+		// Total sync (mirror) forces force_full for this run regardless of the saved setting.
+		$force_full = ( ! empty( $this->get_options()['force_full_sync'] ) || $this->total_sync ) && ! $this->fast_mode;
 
 		$this->attr_map_cache   = array();
 		$this->source_id_to_sku = array();
@@ -3067,9 +3228,10 @@ $defaults = array(
 	}
 
 	/** Start a fresh reconcile: page 1, empty plan. $apply = stamp (not just plan). */
-	private function adopt_reset( $apply ) {
+	private function adopt_reset( $apply, $chain_mirror = false ) {
 		set_transient( self::ADOPT_STATE, array(
 			'apply' => $apply ? 1 : 0,
+			'total' => $chain_mirror ? 1 : 0, // chain into a mirror (total) sync when this apply-adopt finishes
 			'page'  => 1,
 			'done'  => 0,
 			'plan'  => array( 'adopt' => array(), 'ambiguous' => array(), 'claimed' => 0 ),
@@ -3169,9 +3331,10 @@ $defaults = array(
 			spawn_cron();
 			return;
 		}
-		$st   = get_transient( self::ADOPT_STATE );
-		$plan = is_array( $st ) ? $st['plan'] : array( 'adopt' => array(), 'ambiguous' => array(), 'claimed' => 0 );
+		$st    = get_transient( self::ADOPT_STATE );
+		$plan  = is_array( $st ) ? $st['plan'] : array( 'adopt' => array(), 'ambiguous' => array(), 'claimed' => 0 );
 		$apply = is_array( $st ) && ! empty( $st['apply'] );
+		$total = is_array( $st ) && ! empty( $st['total'] );
 		set_transient( 'wps_adopt_preview', $plan, 30 * MINUTE_IN_SECONDS );
 		update_option( self::ADOPT_RESULT, array(
 			'running'   => 0,
@@ -3186,6 +3349,36 @@ $defaults = array(
 			'%sScalanie zakończone: do adopcji %d, wieloznacznych %d, już przypisanych %d.',
 			$apply ? '' : '[podgląd] ', count( $plan['adopt'] ), count( $plan['ambiguous'] ), (int) $plan['claimed']
 		) );
+
+		// Total sync: the adopt phase (SKU + name matching) is now applied, so every product that
+		// exists on both sides carries _wps_source_id and will be UPDATED, not deleted. Chain into the
+		// mirror sync (force_full + hard delete) which removes whatever the source no longer has.
+		if ( $apply && $total ) {
+			$this->start_mirror_sync();
+		}
+	}
+
+	/** Kick off the batched mirror sync (force_full + hard delete). Called after the total-sync adopt
+	 *  phase completes so adopted products are already linked and survive the deletion pass. */
+	private function start_mirror_sync() {
+		if ( false !== get_transient( self::SYNC_PROGRESS_TRANSIENT ) ) {
+			// Rare: another sync started in the window between handle_total_sync's up-front busy check
+			// and the adopt phase finishing. Don't silently drop the mirror — record it where the admin
+			// will see it (the panel reads ADOPT_RESULT and the run summary links to the WC log).
+			$this->log( 'error', 'Total sync: faza lustrzana NIE ruszyła — inna synchronizacja jest w toku. Uruchom „Total sync" ponownie, gdy się zakończy.' );
+			$res = (array) get_option( self::ADOPT_RESULT, array() );
+			$res['mirror_skipped'] = 1;
+			update_option( self::ADOPT_RESULT, $res, false );
+			return;
+		}
+		$this->fast_mode  = false;
+		$this->dry_mode   = false;
+		$this->total_sync = true;
+		$this->reset_run_result( false );
+		$this->seed_sync_progress();
+		$this->log( 'warning', 'Total sync: faza scalania zakończona, uruchamiam synchronizację lustrzaną (twarde usuwanie brakujących).' );
+		wp_schedule_single_event( time(), self::CRON_HOOK );
+		spawn_cron();
 	}
 
 	private function mark_synced( $product_id ) {
@@ -3229,6 +3422,24 @@ $defaults = array(
 		$candidates = array();
 		$page       = 1;
 
+		// Normal sync only ever removes products the plugin itself synced (META_SYNCED EXISTS), so a
+		// product created by another tool is left untouched. A total sync is a MIRROR: it must also
+		// remove foreign products the source doesn't have, so drop the "only ours" filter for it. The
+		// adopt phase already stamped _wps_source_id on everything that DOES match the source, and
+		// those keys are in $source_keys_set, so they are never candidates.
+		$meta_query = array(
+			array(
+				'key'     => self::META_SOFT_DELETED,
+				'compare' => 'NOT EXISTS',
+			),
+		);
+		if ( ! $this->total_sync ) {
+			$meta_query[] = array(
+				'key'     => self::META_SYNCED,
+				'compare' => 'EXISTS',
+			);
+		}
+
 		do {
 			$batch = get_posts( array(
 				'fields'         => 'ids',
@@ -3237,16 +3448,7 @@ $defaults = array(
 				'posts_per_page' => 100,
 				'paged'          => $page,
 				'no_found_rows'  => true,
-				'meta_query'     => array(
-					array(
-						'key'     => self::META_SYNCED,
-						'compare' => 'EXISTS',
-					),
-					array(
-						'key'     => self::META_SOFT_DELETED,
-						'compare' => 'NOT EXISTS',
-					),
-				),
+				'meta_query'     => $meta_query,
 			) );
 			$count = count( $batch );
 			foreach ( $batch as $pid ) {
@@ -3268,7 +3470,7 @@ $defaults = array(
 			$page++;
 		} while ( 100 === $count );
 
-		$mode = ( 'hard' === ( $this->get_options()['deletion_mode'] ?? 'soft' ) ) ? 'hard' : 'soft';
+		$mode = $this->effective_deletion_mode();
 
 		if ( ! $candidates ) {
 			if ( 'soft' === $mode ) {
