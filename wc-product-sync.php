@@ -1233,6 +1233,11 @@ $defaults = array(
 						<div class="notice notice-success"><p>
 							<?php printf( esc_html__( 'Scalono: %d istniejących produktów oznaczono jako powiązane ze źródłem. Następna synchronizacja je zaktualizuje zamiast tworzyć duplikaty.', 'wc-product-sync' ), (int) $adopt_res['adopt'] ); ?>
 						</p></div>
+						<?php if ( ! empty( $adopt_res['mirror_skipped'] ) ) : ?>
+							<div class="notice notice-error"><p>
+								<?php esc_html_e( 'Total sync: faza lustrzana (usuwanie brakujących) NIE ruszyła, bo inna synchronizacja była w toku. Scalanie się wykonało — uruchom „Total sync" ponownie, gdy druga synchronizacja się zakończy.', 'wc-product-sync' ); ?>
+							</p></div>
+						<?php endif; ?>
 					<?php else :
 						$plan = get_transient( 'wps_adopt_preview' );
 						if ( is_array( $plan ) ) :
@@ -1498,7 +1503,10 @@ $defaults = array(
 	}
 
 	/** Count products the source exposes to these credentials. Returns an int (0 if none/hidden by
-	 *  permissions) or a WP_Error on transport failure — the caller must NOT treat an error as empty. */
+	 *  permissions) or a WP_Error on transport failure — the caller must NOT treat an error as empty.
+	 *  The only decision that rides on this is "empty vs non-empty" (the total-sync guard), so when the
+	 *  X-WP-Total header is stripped by a proxy the per_page=1 body is enough: 0 rows → 0, ≥1 row → ≥1,
+	 *  which is all the guard needs. The exact figure only matters when the header is present. */
 	private function source_product_count() {
 		$body = $this->api_get( '/wp-json/wc/v3/products', array( 'per_page' => 1, 'status' => 'any' ) );
 		if ( is_wp_error( $body ) ) {
@@ -3220,10 +3228,10 @@ $defaults = array(
 	}
 
 	/** Start a fresh reconcile: page 1, empty plan. $apply = stamp (not just plan). */
-	private function adopt_reset( $apply, $total = false ) {
+	private function adopt_reset( $apply, $chain_mirror = false ) {
 		set_transient( self::ADOPT_STATE, array(
 			'apply' => $apply ? 1 : 0,
-			'total' => $total ? 1 : 0, // chain into a mirror sync when this apply-adopt finishes
+			'total' => $chain_mirror ? 1 : 0, // chain into a mirror (total) sync when this apply-adopt finishes
 			'page'  => 1,
 			'done'  => 0,
 			'plan'  => array( 'adopt' => array(), 'ambiguous' => array(), 'claimed' => 0 ),
@@ -3354,7 +3362,13 @@ $defaults = array(
 	 *  phase completes so adopted products are already linked and survive the deletion pass. */
 	private function start_mirror_sync() {
 		if ( false !== get_transient( self::SYNC_PROGRESS_TRANSIENT ) ) {
-			$this->log( 'warning', 'Synchronizacja lustrzana pominięta — inna synchronizacja już trwa.' );
+			// Rare: another sync started in the window between handle_total_sync's up-front busy check
+			// and the adopt phase finishing. Don't silently drop the mirror — record it where the admin
+			// will see it (the panel reads ADOPT_RESULT and the run summary links to the WC log).
+			$this->log( 'error', 'Total sync: faza lustrzana NIE ruszyła — inna synchronizacja jest w toku. Uruchom „Total sync" ponownie, gdy się zakończy.' );
+			$res = (array) get_option( self::ADOPT_RESULT, array() );
+			$res['mirror_skipped'] = 1;
+			update_option( self::ADOPT_RESULT, $res, false );
 			return;
 		}
 		$this->fast_mode  = false;

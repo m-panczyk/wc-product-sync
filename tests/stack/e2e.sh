@@ -753,5 +753,18 @@ FAIL10=0
 [ "$FAIL10" -eq 0 ] || exit 1
 echo "  PASS: target mirrors source (3 products), foreign extras hard-deleted, adopted product updated (no duplicate)"
 
+# Phase 10b: the empty-source REFUSAL. handle_total_sync refuses when source_product_count() < 1 (a
+# mirror of an empty/unreachable source would wipe the shop). We can't call the handler directly (it
+# redirects+exits), so we assert the exact input the guard decides on: an emptied but reachable source
+# must report 0 (an int, not a WP_Error), which drives the 'source_empty' refusal.
+echo "==> Phase 10b: total sync refuses an empty source (guard input)"
+swp eval 'foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }' >/dev/null
+EMPTY_CNT="$(twp eval '$s=WC_Product_Sync::instance();$m=new ReflectionMethod("WC_Product_Sync","source_product_count");$m->setAccessible(true);$v=$m->invoke($s);echo is_wp_error($v)?"err":(int)$v;')"
+TGT_BEFORE_GUARD="$(twp eval 'echo count( get_posts( array( "post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) );')"
+echo "    empty source reports=$EMPTY_CNT  (guard refuses when < 1); target still has $TGT_BEFORE_GUARD products"
+[ "$EMPTY_CNT" = "0" ] || { echo "  FAIL: empty source reported '$EMPTY_CNT' (must be 0 so the guard refuses and never mirrors a wipe)" >&2; exit 1; }
+[ "$TGT_BEFORE_GUARD" -eq 3 ] || { echo "  FAIL: target catalog changed while probing an empty source ($TGT_BEFORE_GUARD)" >&2; exit 1; }
+echo "  PASS: empty source → count 0 → total sync would refuse (no catalog wipe)"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse)"
