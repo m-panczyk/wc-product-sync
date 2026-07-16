@@ -614,5 +614,61 @@ echo "    stable=$(echo $CH|cut -d" " -f1)  rc=$(echo $CH|cut -d" " -f2)"
 [ "$CH" = "ok ok" ] || { echo "  FAIL: channel setting does not route the update URL ($CH)" >&2; exit 1; }
 echo "  PASS: stable→latest, rc→latest-beta"
 
+# --- Phase 8: dry run runs in the BACKGROUND and BATCHES ------------------------------------
+#
+# A synchronous dry run over a large catalog blows past the FastCGI read timeout (31s on some
+# hosts) → 500. It must background + batch like the real run. Force a tiny time budget so it is
+# guaranteed to split, drive cron+resume, and assert: >1 batch, nothing written, counts totalled.
+echo "==> Phase 8: dry run backgrounds and batches"
+# Earlier phases shrink the source to a handful of products, so re-seed it to a catalog big
+# enough to force a split; empty the target so the dry run plans creations.
+swp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+for ( $i=1; $i<=30; $i++ ) { $p=new WC_Product_Simple(); $p->set_name(sprintf("E2E Simple %03d",$i)); $p->set_sku(sprintf("E2E-S-%03d",$i)); $p->set_regular_price("10"); $p->set_status("publish"); $p->save(); }' >/dev/null
+twp eval 'foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }' >/dev/null
+opt per_page 10
+opt sync_batch_limit 8      # force a deterministic split by count (time budget is too coarse on a tiny catalog)
+opt max_batch_seconds 0
+opt force_full_sync 0
+
+DRY8="$(twp eval '
+$s=WC_Product_Sync::instance();
+$dm=new ReflectionProperty("WC_Product_Sync","dry_mode");$dm->setAccessible(true);$dm->setValue($s,true);
+$rr=new ReflectionMethod("WC_Product_Sync","reset_run_result");$rr->setAccessible(true);$rr->invoke($s,true);
+$sd=new ReflectionMethod("WC_Product_Sync","seed_sync_progress");$sd->setAccessible(true);$sd->invoke($s);
+$c=new ReflectionMethod("WC_Product_Sync","run_sync_cron");$c->setAccessible(true);$c->invoke($s);
+$b=1; while ( get_transient("wps_sync_progress") ) { $b++; if($b>60)break; $r=new ReflectionMethod("WC_Product_Sync","run_resume_batch");$r->setAccessible(true);$r->invoke($s); }
+$res=get_option("wps_last_sync_result");
+$wrote=count(get_posts(array("post_type"=>"product","numberposts"=>-1,"fields"=>"ids","post_status"=>"any")));
+echo "$b ".($res["created"]??-1)." $wrote ".($res["dry"]??-1);')"
+read B8 CREATED8 WROTE8 DRYFLAG8 <<<"$DRY8"
+echo "    batches=$B8 planned_created=$CREATED8 written=$WROTE8 dry=$DRYFLAG8"
+[ "$B8" -ge 2 ] || { echo "  FAIL: dry run did not batch ($B8 batch) — would time out on a large catalog" >&2; exit 1; }
+[ "$WROTE8" -eq 0 ] || { echo "  FAIL: dry run WROTE $WROTE8 products (must write nothing)" >&2; exit 1; }
+[ "$CREATED8" -ge 1 ] && [ "$DRYFLAG8" = "1" ] || { echo "  FAIL: dry run didn't total counts / mark dry ($CREATED8, dry=$DRYFLAG8)" >&2; exit 1; }
+echo "  PASS: dry run split into $B8 batches, wrote nothing, planned $CREATED8 creations"
+
+# --- Phase 9: adopt runs in the BACKGROUND and BATCHES --------------------------------------
+echo "==> Phase 9: adopt backgrounds and batches"
+opt per_page 1            # 1 product/fetch → many fetches → the 1s budget is exceeded → multiple rounds
+opt max_batch_seconds 1
+twp eval 'foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$p=new WC_Product_Simple(); $p->set_name("E2E Simple 001"); $p->set_sku("ADOPT-OTHER"); $p->set_regular_price("1"); $p->set_status("publish"); $p->save();
+delete_transient("wps_adopt_state"); delete_transient("wps_adopt_preview"); delete_option("wps_adopt_result");' >/dev/null
+
+ADOPT9="$(twp eval '
+$s=WC_Product_Sync::instance();
+$reset=new ReflectionMethod("WC_Product_Sync","adopt_reset");$reset->setAccessible(true);$reset->invoke($s,false);
+update_option("wps_adopt_result",array("running"=>1,"apply"=>0),false);
+$ev=new ReflectionMethod("WC_Product_Sync","run_adopt_event");$ev->setAccessible(true);
+$rounds=0; do { $rounds++; if($rounds>60)break; $ev->invoke($s); $res=get_option("wps_adopt_result"); } while ( is_array($res) && !empty($res["running"]) );
+$prev=get_transient("wps_adopt_preview");
+echo "$rounds ".($res["adopt"]??-1)." ".(is_array($prev)?count($prev["adopt"]):-1);')"
+read R9 ADOPTN9 PREV9 <<<"$ADOPT9"
+echo "    rounds=$R9 adopt=$ADOPTN9 preview=$PREV9"
+[ "$R9" -ge 2 ] || { echo "  FAIL: adopt did not batch ($R9 round) — would time out on a large catalog" >&2; exit 1; }
+[ "$ADOPTN9" -ge 1 ] && [ "$PREV9" -ge 1 ] || { echo "  FAIL: adopt background produced no plan ($ADOPTN9/$PREV9)" >&2; exit 1; }
+echo "  PASS: adopt split into $R9 rounds, planned $ADOPTN9 adoption(s)"
+
 echo
-echo "e2e PASS (multi-batch + force-full + image-failure + empty-source + undo + adopt + channel)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt)"

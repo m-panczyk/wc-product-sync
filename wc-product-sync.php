@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.27-rc2
+ * Version:           0.9.27-rc3
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -41,6 +41,9 @@ final class WC_Product_Sync {
 	const OPTION_KEY      = 'wc_product_sync_options';
 	const CRON_HOOK        = 'wc_product_sync_daily_event';
 	const RESUME_HOOK      = 'wps_sync_resume'; // batch continuation via cron
+	const ADOPT_HOOK       = 'wps_adopt_event'; // background reconcile (adopt existing products)
+	const ADOPT_STATE      = 'wps_adopt_state';  // transient: batched adopt progress + accumulated plan
+	const ADOPT_RESULT     = 'wps_adopt_result'; // option: last adopt run summary for the admin notice
 	const FAST_CRON_HOOK   = 'wc_product_sync_fast_event'; // frequent field-refresh (price/stock)
 	const FAST_SCHEDULE    = 'wps_fast_interval';          // dynamic cron schedule (interval = configured minutes)
 	const LOG_SOURCE       = 'wc-product-sync';
@@ -110,6 +113,10 @@ final class WC_Product_Sync {
 	/** Szybka synchronizacja: tylko wybrane pola (fast_sync_fields), tylko aktualizacja istniejących
 	 *  (bez tworzenia i usuwania). Ustawiane per-przebieg (cron/resume). */
 	private $fast_mode = false;
+	/** Dry-run (simulation) mode for the CURRENT batch. Carried across resume batches in the
+	 *  progress transient (like $fast_mode), so a backgrounded dry run stays a simulation on every
+	 *  batch instead of writing on a resume. */
+	private $dry_mode = false;
 	/** Ostatnie nagłówki odpowiedzi REST API (X-WP-TotalPages) */
 	private $last_api_headers = array();
 
@@ -128,6 +135,7 @@ final class WC_Product_Sync {
 		add_action( 'admin_post_wc_product_sync_step', array( $this, 'handle_step_sync' ) );
 		add_action( 'admin_post_wc_product_sync_undo', array( $this, 'handle_undo' ) );
 		add_action( 'admin_post_wc_product_sync_adopt', array( $this, 'handle_adopt' ) );
+		add_action( self::ADOPT_HOOK, array( $this, 'run_adopt_event' ) );
 		add_action( self::CRON_HOOK, array( $this, 'run_sync_cron' ) );
 		add_action( self::RESUME_HOOK, array( $this, 'run_resume_batch' ) );
 		add_action( self::FAST_CRON_HOOK, array( $this, 'run_fast_sync_cron' ) );
@@ -277,6 +285,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			'started_at'       => $started_at,
 			'updated_at'       => time(),                   // Heartbeat — used to detect a stalled/no-cron sync
 			'fast'             => $this->fast_mode ? 1 : 0, // Resume batches must keep fast (field-refresh) mode
+			'dry'              => $this->dry_mode ? 1 : 0,  // Resume batches must stay a simulation
 		), 3600 ); // Persist for 1 hour (enough for all batches to finish)
 	}
 
@@ -298,14 +307,17 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 			'per_page'           => $this->cfg_per_page(),
 			'started_at'         => time(),
 			'updated_at'         => time(),
+			'dry'                => $this->dry_mode ? 1 : 0,
 		), 3600 );
 	}
 
-	/** Reset the cumulative run-result tracker at the start of a manual/scheduled run. */
-	private function reset_run_result() {
+	/** Reset the cumulative run-result tracker at the start of a manual/scheduled run.
+	 *  $dry marks the run as a simulation so the completion notice can say so. */
+	private function reset_run_result( $dry = false ) {
 		update_option( self::SYNC_LAST_RESULT, array(
 			'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0,
 			'running' => true, 'started_at' => time(), 'finished_at' => 0,
+			'dry'     => $dry ? 1 : 0,
 		), false );
 	}
 
@@ -424,6 +436,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 		// Restore fast (field-refresh) mode for this batch so a multi-batch fast sync stays
 		// update-only/restricted-fields across resumes instead of falling back to a full sync.
 		$this->fast_mode = ! empty( $progress['fast'] );
+		$this->dry_mode  = ! empty( $progress['dry'] ); // keep a backgrounded dry run a simulation on resume
 
 		// Check if a manual sync is already running (Codex #6 fix: sync lock)
 		$lock = get_transient( self::SYNC_LOCK_TRANSIENT );
@@ -457,7 +470,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 		// Set sync lock for this resume batch (Codex #6 fix)
 		set_transient( self::SYNC_LOCK_TRANSIENT, time(), 1800 );
 		try {
-			$this->run_sync_inner( false, $stats, $progress );
+			$this->run_sync_inner( $this->dry_mode, $stats, $progress );
 		} finally {
 			delete_transient( self::SYNC_LOCK_TRANSIENT );
 		}
@@ -482,7 +495,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 		}
 
 		// Fold this batch into the cumulative result + per-item report shown on the settings page.
-		$this->append_run_report( false );
+		$this->append_run_report( $this->dry_mode );
 		$this->accumulate_run_result( $stats, $sync_complete );
 
 		if ( $sync_complete ) {
@@ -876,7 +889,11 @@ $defaults = array(
 				</p></div>
 			<?php elseif ( isset( $_GET['started'] ) ) : ?>
 				<div class="notice notice-info is-dismissible"><p>
-					<?php esc_html_e( 'Synchronizacja uruchomiona w tle. Postęp pojawi się poniżej — użyj przycisku „Odśwież postęp", aby zaktualizować (auto-odświeżanie jest wyłączone).', 'wc-product-sync' ); ?>
+					<?php if ( isset( $_GET['dry'] ) ) : ?>
+						<?php esc_html_e( 'Symulacja (dry run) uruchomiona w tle — nic nie jest zapisywane. Postęp i wynik pojawią się poniżej; użyj „Odśwież postęp".', 'wc-product-sync' ); ?>
+					<?php else : ?>
+						<?php esc_html_e( 'Synchronizacja uruchomiona w tle. Postęp pojawi się poniżej — użyj przycisku „Odśwież postęp", aby zaktualizować (auto-odświeżanie jest wyłączone).', 'wc-product-sync' ); ?>
+					<?php endif; ?>
 				</p></div>
 			<?php elseif ( isset( $_GET['stepped'] ) ) : ?>
 				<div class="notice notice-info is-dismissible"><p>
@@ -890,9 +907,11 @@ $defaults = array(
 				<div class="notice notice-success is-dismissible"><p>
 					<?php printf( esc_html__( 'Cofnięto: %d produktów przeniesiono do kosza. Możesz je przywrócić w Produkty → Kosz.', 'wc-product-sync' ), (int) $_GET['undone'] ); ?>
 				</p></div>
-			<?php elseif ( isset( $_GET['adopted'] ) ) : ?>
-				<div class="notice notice-success is-dismissible"><p>
-					<?php printf( esc_html__( 'Scalono: %d istniejących produktów oznaczono jako zsynchronizowane. Następna synchronizacja je zaktualizuje zamiast tworzyć duplikaty.', 'wc-product-sync' ), (int) $_GET['adopted'] ); ?>
+			<?php elseif ( isset( $_GET['adopt_started'] ) ) : ?>
+				<div class="notice notice-info is-dismissible"><p>
+					<?php echo 'apply' === $_GET['adopt_started']
+						? esc_html__( 'Scalanie uruchomione w tle. Odśwież stronę za chwilę — wynik pojawi się poniżej.', 'wc-product-sync' )
+						: esc_html__( 'Podgląd scalania uruchomiony w tle. Odśwież stronę za chwilę — plan pojawi się poniżej.', 'wc-product-sync' ); ?>
 				</p></div>
 			<?php endif; ?>
 
@@ -1160,36 +1179,46 @@ $defaults = array(
 				</p>
 
 				<?php
-				// Adoption preview table, if one was just generated.
-				if ( isset( $_GET['adopt_preview'] ) ) :
-					$plan = get_transient( 'wps_adopt_preview' );
-					if ( is_array( $plan ) ) :
-						$n_adopt = count( $plan['adopt'] );
-						$n_amb   = count( $plan['ambiguous'] );
-						?>
+				// Adoption status/preview, driven by the backgrounded run (ADOPT_RESULT + preview transient).
+				$adopt_res = get_option( self::ADOPT_RESULT );
+				if ( is_array( $adopt_res ) ) :
+					if ( ! empty( $adopt_res['running'] ) ) : ?>
 						<div class="notice notice-info"><p>
-							<?php printf( esc_html__( 'Podgląd scalania: do scalenia %1$d, wieloznacznych (do ręcznego sprawdzenia) %2$d, już przypisanych %3$d.', 'wc-product-sync' ),
-								$n_adopt, $n_amb, (int) $plan['claimed'] ); ?>
-							<?php if ( $n_adopt ) : ?>
-								<a href="<?php echo esc_url( $adopt_apply_url ); ?>" class="button button-primary"
-									onclick="return confirm('<?php echo esc_js( sprintf( __( 'Scalić %d produktów? Nada im znacznik źródła (odwracalne przez ponowne czyszczenie meta).', 'wc-product-sync' ), $n_adopt ) ); ?>');">
-									<?php printf( esc_html__( 'Scal %d teraz', 'wc-product-sync' ), $n_adopt ); ?></a>
-							<?php endif; ?>
+							<?php esc_html_e( 'Scalanie w toku w tle… Odśwież stronę za chwilę, aby zobaczyć wynik.', 'wc-product-sync' ); ?>
 						</p></div>
-						<?php if ( $n_adopt ) : ?>
-							<table class="widefat striped" style="max-width:60em"><thead><tr>
-								<th><?php esc_html_e( 'Produkt (cel)', 'wc-product-sync' ); ?></th>
-								<th>SKU</th><th><?php esc_html_e( 'Dopasowano po', 'wc-product-sync' ); ?></th>
-							</tr></thead><tbody>
-							<?php foreach ( array_slice( $plan['adopt'], 0, 100 ) as $a ) : ?>
-								<tr>
-									<td><?php echo esc_html( get_the_title( $a['local_id'] ) ); ?> <span class="description">#<?php echo (int) $a['local_id']; ?></span></td>
-									<td><?php echo esc_html( $a['sku'] ?: '—' ); ?></td>
-									<td><?php echo esc_html( $a['how'] ); ?></td>
-								</tr>
-							<?php endforeach; ?>
-							</tbody></table>
-							<?php if ( $n_adopt > 100 ) : ?><p class="description"><?php printf( esc_html__( '…i %d więcej.', 'wc-product-sync' ), $n_adopt - 100 ); ?></p><?php endif; ?>
+					<?php elseif ( ! empty( $adopt_res['apply'] ) ) : ?>
+						<div class="notice notice-success"><p>
+							<?php printf( esc_html__( 'Scalono: %d istniejących produktów oznaczono jako powiązane ze źródłem. Następna synchronizacja je zaktualizuje zamiast tworzyć duplikaty.', 'wc-product-sync' ), (int) $adopt_res['adopt'] ); ?>
+						</p></div>
+					<?php else :
+						$plan = get_transient( 'wps_adopt_preview' );
+						if ( is_array( $plan ) ) :
+							$n_adopt = count( $plan['adopt'] );
+							?>
+							<div class="notice notice-info"><p>
+								<?php printf( esc_html__( 'Podgląd scalania: do scalenia %1$d, wieloznacznych (do ręcznego sprawdzenia) %2$d, już przypisanych %3$d.', 'wc-product-sync' ),
+									$n_adopt, count( $plan['ambiguous'] ), (int) $plan['claimed'] ); ?>
+								<?php if ( $n_adopt ) : ?>
+									<a href="<?php echo esc_url( $adopt_apply_url ); ?>" class="button button-primary"
+										onclick="return confirm('<?php echo esc_js( sprintf( __( 'Scalić %d produktów? Nada im znacznik źródła (odwracalne przez ponowne czyszczenie meta).', 'wc-product-sync' ), $n_adopt ) ); ?>');">
+										<?php printf( esc_html__( 'Scal %d teraz', 'wc-product-sync' ), $n_adopt ); ?></a>
+								<?php endif; ?>
+							</p></div>
+							<?php if ( $n_adopt ) : ?>
+								<table class="widefat striped" style="max-width:60em"><thead><tr>
+									<th><?php esc_html_e( 'Produkt (cel)', 'wc-product-sync' ); ?></th>
+									<th>SKU</th><th><?php esc_html_e( 'Dopasowano po', 'wc-product-sync' ); ?></th>
+								</tr></thead><tbody>
+								<?php foreach ( array_slice( $plan['adopt'], 0, 100 ) as $a ) : ?>
+									<tr>
+										<td><?php echo esc_html( get_the_title( $a['local_id'] ) ); ?> <span class="description">#<?php echo (int) $a['local_id']; ?></span></td>
+										<td><?php echo esc_html( $a['sku'] ?: '—' ); ?></td>
+										<td><?php echo esc_html( $a['how'] ); ?></td>
+									</tr>
+								<?php endforeach; ?>
+								</tbody></table>
+								<?php if ( $n_adopt > 100 ) : ?><p class="description"><?php printf( esc_html__( '…i %d więcej.', 'wc-product-sync' ), $n_adopt - 100 ); ?></p><?php endif; ?>
+							<?php endif; ?>
 						<?php endif; ?>
 					<?php endif; ?>
 				<?php endif; ?>
@@ -1272,33 +1301,20 @@ $defaults = array(
 
 		$dry_run = isset( $_GET['mode'] ) && 'dry' === $_GET['mode'];
 
-		// Dry run is quick and its whole point is to report the counts, so keep it synchronous.
-		if ( $dry_run ) {
-			$stats = $this->run_sync( true );
-			wp_safe_redirect( add_query_arg(
-				array(
-					'page'    => 'wc-product-sync',
-					'synced'  => 1,
-					'created' => $stats['created'],
-					'updated' => $stats['updated'],
-					'skipped' => $stats['skipped'],
-					'errors'  => $stats['errors'],
-				),
-				admin_url( 'admin.php' )
-			) );
-			exit;
-		}
-
-		// Real run: kick off in the background via WP-Cron so the browser isn't blocked for
-		// minutes. Seed a "starting" progress transient + reset the result tracker so the
-		// settings page shows activity immediately and auto-refreshes as batches complete.
+		// Both dry and real runs go to the background via WP-Cron and batch there. A dry run was
+		// once synchronous ("it's quick"), but on a large catalog it processes everything in one
+		// request and mod_fcgid kills it at its read-data timeout (31s on this host) — a generic
+		// 500. Backgrounding + batching keeps every request well under that limit, the same reason
+		// the real run is safe. The 'dry' flag rides in the progress transient so every batch stays
+		// a simulation.
 		if ( false === get_transient( self::SYNC_PROGRESS_TRANSIENT ) ) {
-			$this->reset_run_result();
+			$this->dry_mode = $dry_run;
+			$this->reset_run_result( $dry_run );
 			$this->seed_sync_progress();
 			wp_schedule_single_event( time(), self::CRON_HOOK ); // Immediate one-off, separate from the daily event.
 			spawn_cron(); // Nudge WP-Cron to fire the event now instead of on the next visitor.
 		}
-		wp_safe_redirect( admin_url( 'admin.php?page=wc-product-sync&started=1' ) );
+		wp_safe_redirect( admin_url( 'admin.php?page=wc-product-sync&started=1' . ( $dry_run ? '&dry=1' : '' ) ) );
 		exit;
 	}
 
@@ -1334,11 +1350,17 @@ $defaults = array(
 			wp_die( esc_html__( 'Brak uprawnień.', 'wc-product-sync' ) );
 		}
 		check_admin_referer( self::NONCE_ACTION . '_adopt' );
-		$preview = ( ( $_GET['mode'] ?? 'preview' ) !== 'apply' );
-		$plan    = $this->adopt_existing( $preview );
-		set_transient( 'wps_adopt_preview', $plan, 10 * MINUTE_IN_SECONDS );
+		$apply = ( ( $_GET['mode'] ?? 'preview' ) === 'apply' );
+
+		// Background + batched, like the sync: a full reconcile over a large catalog would blow past
+		// the FastCGI read timeout (31s on some hosts) if run in this request.
+		$this->adopt_reset( $apply );
+		delete_transient( 'wps_adopt_preview' );
+		update_option( self::ADOPT_RESULT, array( 'running' => 1, 'apply' => $apply ? 1 : 0 ), false );
+		wp_schedule_single_event( time(), self::ADOPT_HOOK );
+		spawn_cron();
 		wp_safe_redirect( add_query_arg(
-			array( 'page' => 'wc-product-sync', ( $preview ? 'adopt_preview' : 'adopted' ) => count( $plan['adopt'] ) ),
+			array( 'page' => 'wc-product-sync', 'adopt_started' => $apply ? 'apply' : 'preview' ),
 			admin_url( 'admin.php' )
 		) );
 		exit;
@@ -1381,7 +1403,9 @@ $defaults = array(
 			$this->log( 'info', 'Codzienna synchronizacja odłożona — szybka synchronizacja w toku.' );
 			return;
 		}
-		$this->run_sync( false );
+		// A seeded dry run schedules THIS hook too; honor its flag so the first batch simulates.
+		$this->dry_mode = ! empty( $prog['dry'] );
+		$this->run_sync( $this->dry_mode );
 	}
 
 	/** Frequent field-refresh (e.g. hourly price/stock). Update-only, restricted to fast_sync_fields.
@@ -1549,10 +1573,9 @@ $defaults = array(
 		try {
 			$result = $this->run_sync_inner( $dry_run, $stats, $progress, $still_batching );
 			$this->append_run_report( $dry_run ); // persist this batch's per-item report
-			if ( ! $dry_run ) {
-				// Accumulate this batch into the cumulative result; complete when not still batching.
-				$this->accumulate_run_result( $stats, ! $still_batching );
-			}
+			// Accumulate for dry runs too: they now batch in the background, so the completion
+			// counts must total across batches, not just the last one.
+			$this->accumulate_run_result( $stats, ! $still_batching );
 			return $result;
 		} catch ( \Exception $e ) {
 			$this->log( 'error', 'Wyjątek w sync: ' . $e->getMessage() );
@@ -1608,9 +1631,11 @@ $defaults = array(
 		$products_processed = $progress ? $progress['products_processed'] : 0;
 		$resume_offset      = $progress ? (int) ( $progress['page_offset'] ?? 0 ) : 0; // items already done on the in-progress page
 		$first_page         = true;   // Apply resume_offset only to the first page fetched in THIS batch
-		// Time budget: stop+resume before any PHP timeout. Dry runs process everything in one pass.
+		// Time budget: stop+resume before any PHP/proxy timeout. Applies to dry runs too — they are
+		// now backgrounded and batched, so they must respect the budget or a large-catalog dry run
+		// would run past the FastCGI read timeout (31s on some hosts) and 500. 0 = no budget.
 		$max_secs           = (int) $this->get_options()['max_batch_seconds'];
-		$deadline           = ( $dry_run || $max_secs < 1 ) ? PHP_FLOAT_MAX : microtime( true ) + $max_secs;
+		$deadline           = ( $max_secs < 1 ) ? PHP_FLOAT_MAX : microtime( true ) + $max_secs;
 		$pages_fetched      = 0;      // Track successful pages in this run
 		$fetch_had_error    = false;  // Track if we hit a fetch error during THIS run
 
@@ -1749,9 +1774,12 @@ $defaults = array(
 				}
 				$this->process_single_product( $p, $dry_run, $stats );
 
-				// Time-box + batch-limit at ITEM granularity (real runs). Save progress and stop+resume
-				// BEFORE any PHP timeout, so no batch is ever killed and progress always advances.
-				if ( ! $dry_run ) {
+				// Time-box + batch-limit at ITEM granularity. Save progress and stop+resume BEFORE any
+				// PHP timeout, so no batch is ever killed and progress always advances. Applies to dry
+				// runs too now — a backgrounded dry run is batched exactly like a real one, so it never
+				// exceeds the FastCGI/proxy timeout on a large catalog. (Dry writes nothing; only the
+				// progress transient is saved, which lets the run resume.)
+				{
 					$over = ( microtime( true ) >= $deadline )
 						|| ( $batch_limit > 0 && ( $products_processed - $batch_start_count ) >= $batch_limit );
 					if ( $over ) {
@@ -3019,10 +3047,48 @@ $defaults = array(
 	 *    array( 'adopt' => [ [source_id,local_id,sku,name,how], ... ],
 	 *           'ambiguous' => [ [source_id,sku,name,reason], ... ],
 	 *           'claimed' => N )   // source products already matched to a claimed local (nothing to do) */
+	/** Full-pass reconcile, no time budget — for wp-cli and tests. The admin UI uses the
+	 *  backgrounded, batched path (handle_adopt → run_adopt_event) so it never exceeds the
+	 *  FastCGI/proxy timeout on a large catalog. $dry_run=true only plans; false stamps. */
 	public function adopt_existing( $dry_run = true ) {
-		$plan = array( 'adopt' => array(), 'ambiguous' => array(), 'claimed' => 0 );
-		$page = 1;
-		$per  = $this->cfg_per_page();
+		$this->adopt_reset( ! $dry_run );
+		do {
+			$done = $this->adopt_step( PHP_FLOAT_MAX );
+		} while ( ! $done );
+		$st   = get_transient( self::ADOPT_STATE );
+		$plan = is_array( $st ) ? $st['plan'] : array( 'adopt' => array(), 'ambiguous' => array(), 'claimed' => 0 );
+		delete_transient( self::ADOPT_STATE );
+		$this->log( $dry_run ? 'info' : 'warning', sprintf(
+			'%sScalanie: do adopcji %d, wieloznacznych %d, już przypisanych %d.',
+			$dry_run ? '[DRY] ' : '',
+			count( $plan['adopt'] ), count( $plan['ambiguous'] ), $plan['claimed']
+		) );
+		return $plan;
+	}
+
+	/** Start a fresh reconcile: page 1, empty plan. $apply = stamp (not just plan). */
+	private function adopt_reset( $apply ) {
+		set_transient( self::ADOPT_STATE, array(
+			'apply' => $apply ? 1 : 0,
+			'page'  => 1,
+			'done'  => 0,
+			'plan'  => array( 'adopt' => array(), 'ambiguous' => array(), 'claimed' => 0 ),
+		), HOUR_IN_SECONDS );
+	}
+
+	/** Process source pages from the saved cursor until $deadline (microtime) or the source is
+	 *  exhausted. Accumulates into the state's plan and, in apply mode, stamps _wps_source_id as it
+	 *  goes. Returns true when the whole source has been processed. */
+	private function adopt_step( $deadline ) {
+		$st = get_transient( self::ADOPT_STATE );
+		if ( ! is_array( $st ) ) {
+			return true;
+		}
+		$apply = ! empty( $st['apply'] );
+		$page  = (int) $st['page'];
+		$plan  = $st['plan'];
+		$per   = $this->cfg_per_page();
+		$done  = false;
 		do {
 			$batch = $this->api_get( '/wp-json/wc/v3/products', array(
 				'per_page' => $per,
@@ -3031,56 +3097,95 @@ $defaults = array(
 			) );
 			if ( is_wp_error( $batch ) ) {
 				$this->log( 'error', 'Scalanie: błąd pobierania źródła (strona ' . $page . '): ' . $batch->get_error_message() );
+				$done = true;
 				break;
 			}
 			$count = is_array( $batch ) ? count( $batch ) : 0;
 			foreach ( (array) $batch as $p ) {
-				$src_id = absint( $p['id'] ?? 0 );
-				$sku    = trim( (string) ( $p['sku'] ?? '' ) );
-				$name   = trim( (string) ( $p['name'] ?? '' ) );
-				if ( ! $src_id ) {
-					continue;
-				}
-				// Already claimed by us (by source_id) → nothing to reconcile.
-				if ( self::source_id_to_local( $src_id ) ) {
-					$plan['claimed']++;
-					continue;
-				}
-				$local = 0;
-				$how   = '';
-				if ( '' !== $sku ) {
-					$cand = self::sku_to_id( $sku );
-					if ( $cand && $this->is_unclaimed( $cand ) ) {
-						$local = $cand;
-						$how   = 'SKU';
-					}
-				}
-				if ( ! $local ) {
-					$cand = $this->unclaimed_by_name( $name );
-					if ( $cand ) {
-						$local = $cand;
-						$how   = 'nazwa';
-					}
-				}
-				if ( $local ) {
-					$plan['adopt'][] = array( 'source_id' => $src_id, 'local_id' => $local, 'sku' => $sku, 'name' => $name, 'how' => $how );
-					if ( ! $dry_run ) {
-						update_post_meta( $local, self::META_SOURCE_ID, (string) $src_id );
-					}
-				} else {
-					$plan['ambiguous'][] = array( 'source_id' => $src_id, 'sku' => $sku, 'name' => $name,
-						'reason' => '' === $sku && '' === $name ? 'brak SKU i nazwy' : 'brak jednoznacznego dopasowania na celu' );
-				}
+				$this->adopt_process_product( $p, $apply, $plan );
 			}
 			$page++;
-		} while ( $count === $per );
+			if ( $count < $per ) {
+				$done = true;
+				break;
+			}
+		} while ( microtime( true ) < $deadline );
 
-		$this->log( $dry_run ? 'info' : 'warning', sprintf(
-			'%sScalanie: do adopcji %d, wieloznacznych %d, już przypisanych %d.',
-			$dry_run ? '[DRY] ' : '',
-			count( $plan['adopt'] ), count( $plan['ambiguous'] ), $plan['claimed']
+		$st['page'] = $page;
+		$st['plan'] = $plan;
+		$st['done'] = $done ? 1 : 0;
+		set_transient( self::ADOPT_STATE, $st, HOUR_IN_SECONDS );
+		return $done;
+	}
+
+	/** Match one source product to an unclaimed local one (SKU, then unique name); accumulate. */
+	private function adopt_process_product( array $p, $apply, array &$plan ) {
+		$src_id = absint( $p['id'] ?? 0 );
+		$sku    = trim( (string) ( $p['sku'] ?? '' ) );
+		$name   = trim( (string) ( $p['name'] ?? '' ) );
+		if ( ! $src_id ) {
+			return;
+		}
+		if ( self::source_id_to_local( $src_id ) ) { // already claimed by source_id → nothing to do
+			$plan['claimed']++;
+			return;
+		}
+		$local = 0;
+		$how   = '';
+		if ( '' !== $sku ) {
+			$cand = self::sku_to_id( $sku );
+			if ( $cand && $this->is_unclaimed( $cand ) ) {
+				$local = $cand;
+				$how   = 'SKU';
+			}
+		}
+		if ( ! $local ) {
+			$cand = $this->unclaimed_by_name( $name );
+			if ( $cand ) {
+				$local = $cand;
+				$how   = 'nazwa';
+			}
+		}
+		if ( $local ) {
+			$plan['adopt'][] = array( 'source_id' => $src_id, 'local_id' => $local, 'sku' => $sku, 'name' => $name, 'how' => $how );
+			if ( $apply ) {
+				update_post_meta( $local, self::META_SOURCE_ID, (string) $src_id );
+			}
+		} else {
+			$plan['ambiguous'][] = array( 'source_id' => $src_id, 'sku' => $sku, 'name' => $name,
+				'reason' => '' === $sku && '' === $name ? 'brak SKU i nazwy' : 'brak jednoznacznego dopasowania na celu' );
+		}
+	}
+
+	/** Cron: run one time-boxed reconcile batch; reschedule until done, then publish the plan. */
+	public function run_adopt_event() {
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 900 );
+		}
+		$budget = max( 1, (int) $this->get_options()['max_batch_seconds'] );
+		$done   = $this->adopt_step( microtime( true ) + $budget );
+		if ( ! $done ) {
+			wp_schedule_single_event( time() + 5, self::ADOPT_HOOK );
+			spawn_cron();
+			return;
+		}
+		$st   = get_transient( self::ADOPT_STATE );
+		$plan = is_array( $st ) ? $st['plan'] : array( 'adopt' => array(), 'ambiguous' => array(), 'claimed' => 0 );
+		$apply = is_array( $st ) && ! empty( $st['apply'] );
+		set_transient( 'wps_adopt_preview', $plan, 30 * MINUTE_IN_SECONDS );
+		update_option( self::ADOPT_RESULT, array(
+			'running'   => 0,
+			'apply'     => $apply ? 1 : 0,
+			'adopt'     => count( $plan['adopt'] ),
+			'ambiguous' => count( $plan['ambiguous'] ),
+			'claimed'   => (int) $plan['claimed'],
+			'finished_at' => time(),
+		), false );
+		delete_transient( self::ADOPT_STATE );
+		$this->log( $apply ? 'warning' : 'info', sprintf(
+			'%sScalanie zakończone: do adopcji %d, wieloznacznych %d, już przypisanych %d.',
+			$apply ? '' : '[podgląd] ', count( $plan['adopt'] ), count( $plan['ambiguous'] ), (int) $plan['claimed']
 		) );
-		return $plan;
 	}
 
 	private function mark_synced( $product_id ) {
@@ -3473,15 +3578,19 @@ $defaults = array(
 		delete_option( self::OPTION_KEY );
 		delete_option( self::SYNC_LAST_RESULT );
 		delete_option( self::SYNC_LAST_REPORT );
+		delete_option( self::ADOPT_RESULT );
 		// Scheduled events.
 		wp_clear_scheduled_hook( self::CRON_HOOK );
 		wp_clear_scheduled_hook( self::RESUME_HOOK );
 		wp_clear_scheduled_hook( self::FAST_CRON_HOOK );
+		wp_clear_scheduled_hook( self::ADOPT_HOOK );
 		// In-flight sync transients.
 		delete_transient( self::SYNC_LOCK_TRANSIENT );
 		delete_transient( self::SYNC_PROGRESS_TRANSIENT );
 		delete_transient( self::SYNC_KEYS_TRANSIENT );
 		delete_transient( self::UPDATE_TRANSIENT );
+		delete_transient( self::ADOPT_STATE );
+		delete_transient( 'wps_adopt_preview' );
 	}
 }
 

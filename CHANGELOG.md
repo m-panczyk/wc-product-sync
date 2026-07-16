@@ -2,6 +2,11 @@
 
 ### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, [krytyczne] naprawa dopasowania po nazwie
 
+- **[krytyczne] Symulacja i scalanie nie przekraczają już limitu czasu serwera.** Dry run i „Scal
+  istniejące" robiły całą robotę w jednym żądaniu — na dużym katalogu mod_fcgid ubijał je po swoim
+  limicie (na niektórych hostingach 31 s) i zwracał **500 Internal Server Error**. Obie operacje
+  chodzą teraz **w tle i batchowo**, jak zwykła synchronizacja: każdy fragment mieści się pod limitem
+  czasu, a postęp i wynik pojawiają się w panelu. Zweryfikowane e2e (wymuszony podział na batche).
 - **Wybór kanału aktualizacji w panelu.** Lista „Kanał aktualizacji": **Stabilny** (kanał produkcyjny)
   lub **Testowy (RC)** (kandydaci do wydania). WordPress nie ma natywnego wyboru kanału dla wtyczek — to
   ustawienie kieruje updater na właściwy `update.json` bez edycji `wp-config.php`. Stała
