@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.27-rc5
+ * Version:           0.9.27-rc6
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -574,6 +574,12 @@ $defaults = array(
 		'cron_hour'           => 3,
 		'cron_minute'         => 0,
 		'force_full_sync'     => 0,
+		// Price modifier applied to every synced price relative to the source (regular + sale, simple
+		// + variations). new = source * (1 + pct/100) + fixed, then rounded. Defaults are a no-op
+		// (0% + 0, 2-decimal rounding = the source price unchanged). Only applied when 'price' sync is on.
+		'price_markup_pct'    => 0,          // percentage, may be negative (e.g. -10 = 10% cheaper)
+		'price_markup_fixed'  => 0,          // fixed amount added after the percentage, may be negative
+		'price_rounding'      => 'standard', // standard (2 dp) | integer | charm (.99) | none
 		// Update channel: 'stable' (latest) or 'rc' (latest-beta). Overridden by the
 		// WC_PRODUCT_SYNC_UPDATE_URL constant when it is defined.
 		'update_channel'      => 'stable',
@@ -637,6 +643,70 @@ $defaults = array(
 	/** Is this product type enabled for sync? (types to sync — settings) */
 	private function type_enabled( $type ) {
 		return in_array( $type, (array) $this->get_options()['sync_types'], true );
+	}
+
+	/**
+	 * Apply the configured price modifier to one raw source price and return it as a string ready for
+	 * set_regular_price()/set_sale_price(). An empty source price stays empty (no phantom price). The
+	 * defaults (0% + 0, standard rounding) leave the price unchanged, so this is a no-op until the
+	 * operator configures a markup. Result is floored at 0 — a modifier can't make a price negative.
+	 */
+	private function modify_price( $raw ) {
+		if ( '' === $raw || null === $raw ) {
+			return '';
+		}
+		$opts  = $this->get_options();
+		$pct   = (float) ( $opts['price_markup_pct'] ?? 0 );
+		$fixed = (float) ( $opts['price_markup_fixed'] ?? 0 );
+		$mode  = $opts['price_rounding'] ?? 'standard';
+		// True no-op (the default): return the source price string verbatim so an unmodified sync stays
+		// byte-identical to the source, e.g. "13.60" is not reformatted to "13.6".
+		if ( 0.0 === $pct && 0.0 === $fixed && 'standard' === $mode ) {
+			return (string) $raw;
+		}
+		$val   = (float) $raw;
+		if ( 0.0 !== $pct ) {
+			$val *= ( 1 + $pct / 100 );
+		}
+		$val += $fixed;
+		if ( $val < 0 ) {
+			$val = 0;
+		}
+		switch ( $mode ) {
+			case 'integer':
+				return (string) (int) round( $val );
+			case 'charm': // .99 ending (e.g. 23.40 -> 23.99), a common retail price point. The 1e-6
+				// nudge keeps a value that float-math left at e.g. 109.9999999 from flooring to 109.
+				return (string) ( floor( $val + 1e-6 ) + 0.99 );
+			case 'none':
+				return wc_format_decimal( $val ); // trim to WC's price precision without extra rounding
+			case 'standard':
+			default:
+				return (string) round( $val, 2 );
+		}
+	}
+	/** Transform source prices based on price_promotion_mode.
+	 *
+	 *  When the source has a sale item (regular_price=100, sale_price=80) the user may want:
+	 *   - keep         : copy as-is (current behaviour, default)
+	 *   - promo_to_base: use sale_price as the regular price, clear sale
+	 *   - base_after_promo: use regular_price, clear sale (source was on-sale, show pre-sale price)
+	 *
+	 *  Returns ['regular' => ..., 'sale' => ...] strings ready for set_regular_price()/set_sale_price().
+	 */
+	private function transform_promo_prices( array $p ) {
+		$reg = isset( $p['regular_price'] ) && '' !== $p['regular_price'] ? $p['regular_price'] : '';
+		$sal = isset( $p['sale_price'] )    && '' !== $p['sale_price']    ? $p['sale_price']    : '';
+		$mode = ( $this->get_options()['price_promotion_mode'] ?? 'keep' );
+
+		switch ( $mode ) {
+			case 'promo_to_base':
+				return array( 'regular' => $sal ?: $reg, 'sale' => '' );
+			case 'base_after_promo':
+				return array( 'regular' => $reg, 'sale' => '' );
+			default: // keep
+				return array( 'regular' => $reg, 'sale' => $sal );
+		}
 	}
 
 	/** Should this data field be written? On CREATE everything is imported; on UPDATE a field
@@ -733,6 +803,17 @@ $defaults = array(
 		}
 		$dm = isset( $input['deletion_mode'] ) ? $input['deletion_mode'] : 'none';
 		$out['deletion_mode']   = in_array( $dm, array( 'none', 'soft', 'hard' ), true ) ? $dm : 'none';
+		// Price modifier (may be negative for a markdown).
+		if ( isset( $input['price_markup_pct'] ) ) {
+			$out['price_markup_pct']   = (float) str_replace( ',', '.', (string) $input['price_markup_pct'] );
+		}
+		if ( isset( $input['price_markup_fixed'] ) ) {
+			$out['price_markup_fixed'] = (float) str_replace( ',', '.', (string) $input['price_markup_fixed'] );
+		}
+		$out['price_rounding']  = in_array( $pr, array( 'standard', 'integer', 'charm', 'none' ), true ) ? $pr : 'standard';
+		// Promotion handling mode — controls how source sale_price → target regular/sale_price mapping.
+		$ppm = isset( $input['price_promotion_mode'] ) ? $input['price_promotion_mode'] : 'keep';
+		$out['price_promotion_mode'] = in_array( $ppm, array( 'keep', 'promo_to_base', 'base_after_promo' ), true ) ? $ppm : 'keep';
 		$uc = isset( $input['update_channel'] ) ? $input['update_channel'] : 'stable';
 		$out['update_channel']  = in_array( $uc, array( 'stable', 'rc' ), true ) ? $uc : 'stable';
 		// Switching channel must take effect now, not after the 12h metadata cache — drop it so the
@@ -1093,6 +1174,39 @@ $defaults = array(
 								'dimensions'  => __( 'Waga i wymiary', 'wc-product-sync' ),
 							), $opts['sync_fields'] ); ?>
 							<p class="description"><?php esc_html_e( 'Odznaczone pola NIE są nadpisywane (przy tworzeniu i aktualizacji) — lokalne zmiany są zachowane. Nazwa, status i SKU są zawsze synchronizowane.', 'wc-product-sync' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Modyfikator ceny', 'wc-product-sync' ); ?></th>
+						<td>
+							<?php $wps_round = $opts['price_rounding'] ?? 'standard'; ?>
+							<label><?php esc_html_e( 'Procent:', 'wc-product-sync' ); ?>
+								<input type="number" step="0.01" style="width:90px"
+									name="<?php echo esc_attr( self::OPTION_KEY ); ?>[price_markup_pct]"
+									value="<?php echo esc_attr( $opts['price_markup_pct'] ?? 0 ); ?>" /> %</label>
+							&nbsp;&nbsp;
+							<label><?php esc_html_e( 'Kwota stała:', 'wc-product-sync' ); ?>
+								<input type="number" step="0.01" style="width:100px"
+									name="<?php echo esc_attr( self::OPTION_KEY ); ?>[price_markup_fixed]"
+									value="<?php echo esc_attr( $opts['price_markup_fixed'] ?? 0 ); ?>" /></label>
+							&nbsp;&nbsp;
+							<label><?php esc_html_e( 'Zaokrąglenie:', 'wc-product-sync' ); ?>
+								<select name="<?php echo esc_attr( self::OPTION_KEY ); ?>[price_rounding]">
+									<option value="standard" <?php selected( $wps_round, 'standard' ); ?>><?php esc_html_e( 'Standardowo (2 miejsca)', 'wc-product-sync' ); ?></option>
+									<option value="integer"  <?php selected( $wps_round, 'integer' ); ?>><?php esc_html_e( 'Do pełnych', 'wc-product-sync' ); ?></option>
+									<option value="charm"    <?php selected( $wps_round, 'charm' ); ?>><?php esc_html_e( 'Końcówka ,99', 'wc-product-sync' ); ?></option>
+									<option value="none"     <?php selected( $wps_round, 'none' ); ?>><?php esc_html_e( 'Bez zaokrąglania', 'wc-product-sync' ); ?></option>
+								</select></label>
+							<p class="description">
+								<?php esc_html_e( 'Cena na celu = cena źródła × (1 + procent/100) + kwota stała, potem zaokrąglenie. Dotyczy ceny regularnej i promocyjnej, produktów prostych i wariacji. Wartości ujemne obniżają cenę; wynik nigdy nie spada poniżej 0. Domyślnie (0% + 0) cena jest kopiowana bez zmian. Działa tylko, gdy pole „Cena" powyżej jest włączone.', 'wc-product-sync' ); ?>
+							</p>
+						<?php $wps_ppm = $opts['price_promotion_mode'] ?? "keep"; ?>
+						<p><label for="price_promotion_mode"><?php esc_html_e( "Tryb promocji:", "wc-product-sync" ); ?></label>
+						<select id="price_promotion_mode" name="wc_product_sync_options[price_promotion_mode]">
+							<option value="keep"<?php selected( $wps_ppm, "keep" ); ?>><?php esc_html_e( "Kopiuj promocję bez zmian (domyślne)", "wc-product-sync" ); ?></option>
+							<option value="promo_to_base"<?php selected( $wps_ppm, "promo_to_base" ); ?>><?php esc_html_e( "Cena promocyjna → podstawowa (usuń oznaczenie promocji)", "wc-product-sync" ); ?></option>
+							<option value="base_after_promo"<?php selected( $wps_ppm, "base_after_promo" ); ?>><?php esc_html_e( "Cena przed promocją → podstawowa (nie kopiuj promocji)", "wc-product-sync" ); ?></option>
+						</select></p>
 						</td>
 					</tr>
 					<tr>
@@ -2448,8 +2562,17 @@ $defaults = array(
 		}
 		if ( 'WC_Product_Simple' === $wanted_class ) {
 			if ( $this->field_on( 'price' ) ) {
-				$product->set_regular_price( isset( $p['regular_price'] ) ? (string) $p['regular_price'] : '' );
-				$product->set_sale_price( isset( $p['sale_price'] ) ? (string) $p['sale_price'] : '' );
+				$prices  = $this->transform_promo_prices( $p );
+				if ( '' !== $prices['regular'] ) {
+					$product->set_regular_price( $this->modify_price( $prices['regular'] ) );
+				} else {
+					$product->set_regular_price( '' );
+				}
+				if ( '' !== $prices['sale'] ) {
+					$product->set_sale_price( $this->modify_price( $prices['sale'] ) );
+				} else {
+					$product->set_sale_price( '' );
+				}
 			}
 			$this->apply_stock( $product, $p ); // self-gated by field_on('stock')
 		} elseif ( 'WC_Product_Variable' === $wanted_class ) {
@@ -2516,8 +2639,17 @@ $defaults = array(
 		}
 		if ( 'WC_Product_Simple' === $wanted_class ) {
 			if ( $this->field_on( 'price' ) ) {
-				$product->set_regular_price( isset( $p['regular_price'] ) ? (string) $p['regular_price'] : '' );
-				$product->set_sale_price( isset( $p['sale_price'] ) ? (string) $p['sale_price'] : '' );
+				$prices  = $this->transform_promo_prices( $p );
+				if ( '' !== $prices['regular'] ) {
+					$product->set_regular_price( $this->modify_price( $prices['regular'] ) );
+				} else {
+					$product->set_regular_price( '' );
+				}
+				if ( '' !== $prices['sale'] ) {
+					$product->set_sale_price( $this->modify_price( $prices['sale'] ) );
+				} else {
+					$product->set_sale_price( '' );
+				}
 			}
 			$this->apply_stock( $product, $p ); // self-gated by field_on('stock')
 		} elseif ( 'WC_Product_Variable' === $wanted_class ) {
@@ -2814,8 +2946,17 @@ $defaults = array(
 				}
 				$variation->set_status( ( $sv['status'] ?? 'publish' ) === 'private' ? 'private' : 'publish' );
 				if ( $this->field_on( 'price' ) ) {
-					$variation->set_regular_price( isset( $sv['regular_price'] ) ? (string) $sv['regular_price'] : '' );
-					$variation->set_sale_price( isset( $sv['sale_price'] ) ? (string) $sv['sale_price'] : '' );
+					$prices   = $this->transform_promo_prices( $sv );
+					if ( '' !== $prices['regular'] ) {
+						$variation->set_regular_price( $this->modify_price( $prices['regular'] ) );
+					} else {
+						$variation->set_regular_price( '' );
+					}
+					if ( '' !== $prices['sale'] ) {
+						$variation->set_sale_price( $this->modify_price( $prices['sale'] ) );
+					} else {
+						$variation->set_sale_price( '' );
+					}
 				}
 				$this->apply_stock( $variation, $sv );
 				$this->apply_physical( $variation, $sv );

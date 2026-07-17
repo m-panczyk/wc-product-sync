@@ -1,7 +1,32 @@
 ## Zmiany (Changelog)
 
+### 0.9.27-rc6 — kontrola propagacji cen promocyjnych ze źródła (#18)
+
+- **Tryb promocji** (`price_promotion_mode`) w sekcji „Modyfikator ceny" panelu wtyczki.
+  Gdy źródło wystawia produkt na promocję (`regular_price: 100`, `sale_price: 80`) można wybrać,
+  jak ma to być odzwierciedlone na celu:
+  - **Kopiuj promocję bez zmian (domyślne)** — kopiuje regular + sale, cel pokazuje wyprzedaż.
+    Zachowuje dotychczasowe zachowanie wtyczki (`keep`).
+  - **Cena promocyjna → podstawowa** — cena z pola `sale_price` na źródle staje się ceną regularną
+    na celu, pole promocyjne jest czyszczone (promocja „przepływa" do ceny bazowej).
+  - **Cena przed promocją → podstawowa** — cena `regular_price` zostaje jako regularna na celu,
+    pole promocyjne jest czyszczone (nie kopiujemy oznaczenia wyprzedaży).
+  Implementacja: nowe ustawienie `price_promotion_mode`, nowa metoda prywatna
+  `transform_promo_prices()` wstrzyknięta między pozyskiwanie źródła a WooCommerce
+  `set_regular_price()/set_sale_price()`, zaktualizowane trzy miejsca zapisu ceny (UPDATE prostego,
+  CREATE prostego, UPDATE wariacji). Tryb `keep` jest domyślny — **kompatybilne wstecz**, istniejące
+  instalacje nie widzą zmian.
+
 ### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, total sync, [krytyczne] naprawa dopasowania po nazwie
 
+- **Modyfikator ceny przy synchronizacji (#14).** Nowe ustawienie „Modyfikator ceny": **procent** i/lub
+  **kwota stała** względem źródła, z wyborem **zaokrąglenia** (standardowo 2 miejsca / do pełnych /
+  końcówka ,99 / bez). Wzór: `cena celu = cena źródła × (1 + procent/100) + kwota stała`, potem
+  zaokrąglenie; dotyczy ceny **regularnej i promocyjnej**, produktów **prostych i wariacji**. Wartości
+  ujemne obniżają cenę (wynik nie spada poniżej 0). Zawsze liczone od **ceny źródła** przy każdym
+  przebiegu, więc jest **idempotentne** (nie kumuluje się). Domyślnie (0% + 0) cena jest kopiowana
+  **bez zmian** — bez wpływu na istniejące instalacje. Działa tylko przy włączonym polu „Cena".
+  Zweryfikowane e2e (+10%+5 → 115/93, końcówka ,99 → 110.99, domyślnie bez zmian).
 - **[krytyczne] Nieudany zapis wariacji nie kasuje już istniejących wariacji (#15).** Główna przyczyna
   „pustego produktu wariantowego" zgłoszona w #15: przy synchronizacji produktu zmiennego, gdy zapis
   wariacji **nie powiódł się** — najczęściej `Invalid or duplicated SKU`, bo SKU tej wariacji trzyma na
