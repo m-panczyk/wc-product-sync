@@ -814,5 +814,43 @@ echo "    after unblocking → variations synced=$RECOVERED"
 [ "$RECOVERED" = "2" ] || { echo "  FAIL: recovery re-sync did not restore the 2 variations (got $RECOVERED)" >&2; exit 1; }
 echo "  PASS: variations-fetch failure aborted the empty create + counted an error; recovered cleanly next run"
 
+# --- Phase 11b: a failed variation save must NOT wipe the existing variations (issue #15, real case)
+#
+# The reported bug: syncing a variable product whose variation SKU collides with one another product
+# on the target already holds → WC rejects the save ("Invalid or duplicated SKU"), and the old code
+# then pruned the "stale" (unreplaced) children — leaving an empty variable product. The fix skips the
+# prune whenever any variation failed, so the existing variations survive and the run reports an error.
+echo "==> Phase 11b: a failed variation save preserves existing variations, never wipes them (issue #15)"
+# Source: variable "Plaszcz", one variation carrying SKU COLLIDE-1.
+swp eval '
+foreach ( get_posts(array("post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids")) as $id ){ wp_delete_post($id,true); }
+$p=new WC_Product_Variable(); $p->set_name("Plaszcz"); $p->set_sku("SRC-PLASZCZ"); $p->set_status("publish");
+$a=new WC_Product_Attribute(); $a->set_name("Rozmiar"); $a->set_options(array("S","M")); $a->set_visible(true); $a->set_variation(true);
+$p->set_attributes(array($a)); $pid=$p->save();
+$v1=new WC_Product_Variation(); $v1->set_parent_id($pid); $v1->set_attributes(array("rozmiar"=>"s")); $v1->set_sku("COLLIDE-1"); $v1->set_regular_price("160"); $v1->set_status("publish"); $v1->save();
+$v2=new WC_Product_Variation(); $v2->set_parent_id($pid); $v2->set_attributes(array("rozmiar"=>"m")); $v2->set_sku("SRC-PL-M"); $v2->set_regular_price("160"); $v2->set_status("publish"); $v2->save();
+' >/dev/null
+# Target: another product already owns SKU COLLIDE-1, plus a MANUAL "Plaszcz" (no _wps_source_id) with 2 variations.
+twp eval '
+foreach ( get_posts(array("post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids")) as $id ){ wp_delete_post($id,true); }
+$s=new WC_Product_Simple(); $s->set_name("Inny"); $s->set_sku("COLLIDE-1"); $s->set_regular_price("5"); $s->set_status("publish"); $s->save();
+$p=new WC_Product_Variable(); $p->set_name("Plaszcz"); $p->set_sku("MAN-PLASZCZ"); $p->set_status("publish");
+$a=new WC_Product_Attribute(); $a->set_name("Rozmiar"); $a->set_options(array("S","M")); $a->set_visible(true); $a->set_variation(true);
+$p->set_attributes(array($a)); $pid=$p->save();
+$v1=new WC_Product_Variation(); $v1->set_parent_id($pid); $v1->set_attributes(array("rozmiar"=>"s")); $v1->set_sku("MAN-PL-S"); $v1->set_regular_price("200"); $v1->set_status("publish"); $v1->save();
+$v2=new WC_Product_Variation(); $v2->set_parent_id($pid); $v2->set_attributes(array("rozmiar"=>"m")); $v2->set_sku("MAN-PL-M"); $v2->set_regular_price("200"); $v2->set_status("publish"); $v2->save();
+foreach ( glob( WP_CONTENT_DIR."/uploads/wc-logs/wc-product-sync*.log" ) as $f ){ unlink($f); }
+' >/dev/null
+drive >/dev/null
+PID_B="$(twp eval '$ids=get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Plaszcz")); echo $ids?$ids[0]:0;')"
+KIDS_B="$(twp eval '$p=wc_get_product('"$PID_B"'); echo $p?count($p->get_children()):-1;')"
+ERRS_B="$(twp eval '$r=get_option("wps_last_sync_result"); echo (int)($r["errors"]??0);')"
+NPROD_B="$(twp eval 'echo count(get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Plaszcz")));')"
+echo "    adopted Plaszcz #$PID_B children=$KIDS_B (must stay 2, not wiped)  errors=$ERRS_B  #Plaszcz=$NPROD_B"
+[ "$KIDS_B" -eq 2 ] || { echo "  FAIL: a variation-save collision wiped the existing variations (children=$KIDS_B, expected 2)" >&2; exit 1; }
+[ "$ERRS_B" -ge 1 ] || { echo "  FAIL: the duplicated-SKU failure was not reported as an error" >&2; exit 1; }
+[ "$NPROD_B" -eq 1 ] || { echo "  FAIL: expected 1 'Plaszcz' (adopted by name), got $NPROD_B" >&2; exit 1; }
+echo "  PASS: duplicated-SKU variation failure preserved the existing variations + reported an error (no empty parent)"
+
 echo
 echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity)"

@@ -2762,11 +2762,12 @@ $defaults = array(
 
 		$kept = array();
 		foreach ( $source_vars as $sv ) {
+			$vid = null; // resolved match for THIS source variation; reset before any throw point so
+			             // the catch never keeps a stale id from a previous iteration.
 			try {
 				$svsku   = isset( $sv['sku'] ) ? trim( $sv['sku'] ) : '';
 				$attrs   = $this->build_variation_attributes( $sv['attributes'] ?? array() );
 				$sig     = $this->signature( $attrs );
-				$vid     = null;
 
 				if ( $svsku && isset( $by_sku[ $svsku ] ) ) {
 					$vid = $by_sku[ $svsku ];
@@ -2821,7 +2822,13 @@ $defaults = array(
 
 		if ( $this->fast_mode ) {
 			// Fast field-refresh is update-only — leave variation add/remove to the daily full sync.
-		} elseif ( ! $this->variations_fetch_error ) {
+		} elseif ( ! $this->variations_fetch_error && ! $this->last_variation_failed ) {
+			// Only prune stale children when EVERY source variation was written successfully. If any
+			// save failed (#15 — most often WC's "Invalid or duplicated SKU" when another product
+			// already holds that SKU), the failed ones are missing from $kept, so pruning would delete
+			// the existing variations they were meant to replace and leave an empty variable product.
+			// Keeping the old variations and reporting the error is always safer than destroying them;
+			// a later clean run prunes anything genuinely removed from the source.
 			foreach ( $parent->get_children() as $vid ) {
 				if ( empty( $kept[ $vid ] ) ) {
 					$stale = wc_get_product( $vid );
@@ -2833,7 +2840,8 @@ $defaults = array(
 				}
 			}
 		} else {
-			$this->log( 'warning', sprintf( 'Błąd pobierania wariacji rodzica %d – pomijam usuwanie dzieci.', $target_parent_id ) );
+			$reason = $this->variations_fetch_error ? 'błąd pobrania wariacji' : 'część wariacji nie zapisała się';
+			$this->log( 'warning', sprintf( 'Rodzic %d: %s – pomijam usuwanie dzieci (zachowuję istniejące wariacje).', $target_parent_id, $reason ) );
 		}
 
 		$this->last_variation_count = count( $kept );

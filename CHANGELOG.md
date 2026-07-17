@@ -2,15 +2,21 @@
 
 ### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, total sync, [krytyczne] naprawa dopasowania po nazwie
 
-- **[krytyczne] Produkt wariantowy nie jest już zapisywany „na pusto" (#15).** Gdy pobranie wariacji ze
-  źródła się nie udało (endpoint `/products/{id}/variations` zwraca **401** — ten sam podział uprawnień
-  co przy `/products/attributes` — albo timeout), wtyczka tworzyła mimo to **pustego rodzica** bez
-  wariacji: produkt bez ceny, `purchasable=false`, `variations: []` — a przebieg meldował `błędy=0`.
-  Teraz taki create jest **przerywany** (usuwany rodzic i ewentualne niepełne dzieci), **liczony jako
-  błąd** i raportowany, a nie zostawiany jako martwy produkt w katalogu; następny czysty przebieg
-  odbudowuje produkt z kompletem wariacji. Przy **aktualizacji** istniejące wariacje nie są już cicho
-  kasowane przy błędzie pobrania — zostają nietknięte, a błąd jest raportowany. Zweryfikowane e2e
-  (zablokowany `/variations` → brak pustego produktu + `błędy≥1`, po odblokowaniu pełna odbudowa).
+- **[krytyczne] Nieudany zapis wariacji nie kasuje już istniejących wariacji (#15).** Główna przyczyna
+  „pustego produktu wariantowego" zgłoszona w #15: przy synchronizacji produktu zmiennego, gdy zapis
+  wariacji **nie powiódł się** — najczęściej `Invalid or duplicated SKU`, bo SKU tej wariacji trzyma na
+  celu **inny produkt** (np. wcześniejszy duplikat) — kod i tak wykonywał potem pętlę usuwania
+  „nieaktualnych" dzieci i **kasował istniejące wariacje**, zostawiając rodzica z `variations: []`.
+  Teraz, jeśli **którakolwiek** wariacja się nie zapisała (albo nie udało się pobrać wariacji),
+  **pomijamy usuwanie dzieci** — istniejące wariacje zostają nietknięte, a przebieg **zgłasza błąd**
+  (`błędy≥1`). Dane nigdy nie są niszczone przy częściowej awarii; kolejny czysty przebieg dosprząta.
+  Zweryfikowane e2e (kolizja SKU przy adopcji po nazwie → wariacje zachowane, `błędy=1`, brak
+  pustego produktu).
+- **Produkt wariantowy nie jest tworzony „na pusto" przy braku wariacji (#15).** Gdy pobranie wariacji
+  ze źródła się nie udało (`/products/{id}/variations` → **401**, ten sam podział uprawnień co przy
+  `/products/attributes`, albo timeout) lub źródło nie zwróciło żadnej wariacji, **tworzenie** rodzica
+  jest **przerywane** (usuwany rodzic i niepełne dzieci) i **liczone jako błąd**, zamiast zostawiać
+  martwy, niekupowalny produkt; następny czysty przebieg odbudowuje go z kompletem wariacji.
 - **Total sync (lustro źródła).** Nowy, oddzielny przycisk w sekcji „Uruchomienie ręczne", który robi
   sklep **lustrem źródła**: (1) scala istniejące produkty po **SKU i nazwie**, (2) synchronizuje cały
   katalog źródła, (3) **twardo usuwa** (bez kosza) każdy produkt na celu, którego nie ma na źródle.
