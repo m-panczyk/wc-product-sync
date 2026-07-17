@@ -2,6 +2,14 @@
 
 ### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, total sync, [krytyczne] naprawa dopasowania po nazwie
 
+- **Harmonogram: godzina działa i respektuje strefę czasu (#12).** Dwie usterki. (1) Zmiana godziny
+  uruchomienia **nie przeplanowywała** już zaplanowanego zadania — ustawienie „nie działało", dopóki nie
+  wyłączyłeś i włączyłeś harmonogramu. Reconciler przenosi teraz zadanie, gdy zapisana godzina/minuta się
+  różni od zaplanowanej. (2) Godzina była liczona przez `mktime()` na częściach `gmdate()`, czyli
+  **jako UTC**, choć pole jest opisane jako czas WordPressa — na strefie +2 wpisanie **01:00** dawało
+  uruchomienie o **03:00**. Czas liczony jest teraz w strefie witryny (`wp_timezone()`), więc wpisana
+  godzina znaczy to, co obiecuje etykieta. Zweryfikowane e2e (strefa +2: 01:30 planuje 01:30 lokalnie,
+  edycja godziny przenosi przebieg).
 - **Total sync (lustro źródła).** Nowy, oddzielny przycisk w sekcji „Uruchomienie ręczne", który robi
   sklep **lustrem źródła**: (1) scala istniejące produkty po **SKU i nazwie**, (2) synchronizuje cały
   katalog źródła, (3) **twardo usuwa** (bez kosza) każdy produkt na celu, którego nie ma na źródle.
