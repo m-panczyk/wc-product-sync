@@ -104,6 +104,8 @@ final class WC_Product_Sync {
 	private $last_image_failed = false;
 	/** Czy przy ostatnim produkcie poległa którakolwiek wariacja (→ liczone jako błąd) */
 	private $last_variation_failed = false;
+	/** Ile wariacji faktycznie zsynchronizowano dla ostatniego produktu zmiennego (0 = puste/awaria) */
+	private $last_variation_count = 0;
 	/** Lokalne ID ostatnio zapisanego produktu (create lub update) — do znakowania _wps_created_run */
 	private $last_saved_id = 0;
 	/** started_at bieżącego przebiegu; ten sam we wszystkich batchach (z SYNC_LAST_RESULT) */
@@ -193,12 +195,21 @@ final class WC_Product_Sync {
 		$opts   = get_option( self::OPTION_KEY, array() );
 		$hour   = isset( $opts['cron_hour'] ) ? (int) $opts['cron_hour'] : 3;
 		$minute = isset( $opts['cron_minute'] ) ? (int) $opts['cron_minute'] : 0;
-		$now    = time();
-		$today  = mktime( $hour, $minute, 0, gmdate( 'n', $now ), gmdate( 'j', $now ), gmdate( 'Y', $now ) );
-		if ( $today <= $now ) {
-			$today = strtotime( '+1 day', $today );
+		wp_schedule_event( self::compute_next_run_ts( $hour, $minute ), 'daily', self::CRON_HOOK );
+	}
+
+	/** UTC timestamp of the next $hour:$minute in the SITE's timezone (not UTC). WordPress runs PHP in
+	 *  UTC, so mktime()/strtotime() would read the chosen hour as UTC and land the run at the wrong
+	 *  wall-clock time on any non-UTC site — the "shows 03:00 for 01:00" bug. Anchoring to wp_timezone()
+	 *  makes the configured hour mean what the UI label ("Domena czasu WordPress") promises. */
+	private static function compute_next_run_ts( $hour, $minute ) {
+		$tz     = wp_timezone();
+		$now    = new DateTimeImmutable( 'now', $tz );
+		$target = $now->setTime( (int) $hour, (int) $minute, 0 );
+		if ( $target <= $now ) {
+			$target = $target->modify( '+1 day' );
 		}
-		wp_schedule_event( $today, 'daily', self::CRON_HOOK );
+		return $target->getTimestamp();
 	}
 
 	public static function deactivate() {
@@ -207,14 +218,32 @@ final class WC_Product_Sync {
 	}
 
 	public function sync_cron_schedule() {
-		$enabled   = ! empty( $this->get_options()['schedule_enabled'] );
-		$scheduled = (bool) wp_next_scheduled( self::CRON_HOOK );
-		if ( $enabled && ! $scheduled ) {
+		$enabled = ! empty( $this->get_options()['schedule_enabled'] );
+		$next    = wp_next_scheduled( self::CRON_HOOK );
+		if ( ! $enabled ) {
+			if ( $next ) {
+				wp_clear_scheduled_hook( self::CRON_HOOK );
+			}
+		} elseif ( ! $next ) {
 			$this->schedule_next_run();
-		} elseif ( ! $enabled && $scheduled ) {
+		} elseif ( ! $this->cron_time_matches( $next ) ) {
+			// The daily event exists but at a different time than the saved hour/minute — a changed
+			// setting. Move it (clear + reschedule); without this, editing the time never took effect
+			// on an already-scheduled event, which is the "settings do nothing" half of the bug.
 			wp_clear_scheduled_hook( self::CRON_HOOK );
+			$this->schedule_next_run();
+			$this->log( 'info', 'Zmieniono godzinę harmonogramu — przeplanowano codzienną synchronizację.' );
 		}
 		$this->reconcile_fast_cron();
+	}
+
+	/** True when the scheduled event's LOCAL wall-clock time equals the configured hour:minute. */
+	private function cron_time_matches( $ts ) {
+		$opts   = $this->get_options();
+		$hour   = isset( $opts['cron_hour'] ) ? (int) $opts['cron_hour'] : 3;
+		$minute = isset( $opts['cron_minute'] ) ? (int) $opts['cron_minute'] : 0;
+		$local  = ( new DateTimeImmutable( '@' . (int) $ts ) )->setTimezone( wp_timezone() );
+		return (int) $local->format( 'G' ) === $hour && (int) $local->format( 'i' ) === $minute;
 	}
 
 	/** Register the dynamic cron schedule used by the fast field-refresh sync. Its interval always
@@ -260,13 +289,9 @@ final class WC_Product_Sync {
 	private function schedule_next_run() {
 		$hour   = (int) $this->get_options()['cron_hour'];
 		$minute = (int) $this->get_options()['cron_minute'];
-		$now    = time();
-		$today  = mktime( $hour, $minute, 0, gmdate( 'n', $now ), gmdate( 'j', $now ), gmdate( 'Y', $now ) );
-		if ( $today <= $now ) {
-			$today = strtotime( '+1 day', $today );
-		}
-		wp_schedule_event( $today, 'daily', self::CRON_HOOK );
-		$this->log( 'info', sprintf( 'Zaplanowano sync: o %02d:%02d (dzisiaj/jutro)', $hour, $minute ) );
+		$ts     = self::compute_next_run_ts( $hour, $minute );
+		wp_schedule_event( $ts, 'daily', self::CRON_HOOK );
+		$this->log( 'info', sprintf( 'Zaplanowano sync: %s (czas lokalny).', wp_date( 'Y-m-d H:i', $ts ) ) );
 	}
 
 	/* =====================================================================
@@ -2598,6 +2623,17 @@ $defaults = array(
 		}
 		if ( 'WC_Product_Variable' === $wanted_class ) {
 			$this->sync_variations( $id, (int) $p['id'] );
+			// Never persist a NEW variable product with zero variations — that is the broken,
+			// unpurchasable "empty parent" from issue #15. It happens when the source /variations
+			// endpoint errors (401/timeout) or returns nothing. Remove what we just created (parent +
+			// any partially-written children) and fail loudly, so it is counted as an error and
+			// retried next run instead of leaving a dead product in the catalog.
+			if ( $this->variations_fetch_error || 0 === $this->last_variation_count ) {
+				$this->delete_product_with_children( $id );
+				throw new \RuntimeException( $this->variations_fetch_error
+					? 'Nie udało się pobrać wariacji ze źródła — produkt wariantowy NIE został utworzony (uniknięto pustego produktu).'
+					: 'Źródłowy produkt wariantowy nie ma żadnych wariacji — NIE utworzono (uniknięto pustego produktu).' );
+			}
 			WC_Product_Variable::sync( $id );
 		}
 
@@ -2779,12 +2815,32 @@ $defaults = array(
 		return 0;
 	}
 
+	/** Permanently delete a product and every variation child, leaving no orphaned rows. */
+	private function delete_product_with_children( $product_id ) {
+		$product = wc_get_product( $product_id );
+		if ( $product ) {
+			foreach ( $product->get_children() as $child_id ) {
+				wp_delete_post( $child_id, true );
+			}
+			$product->delete( true );
+		} else {
+			wp_delete_post( $product_id, true );
+		}
+	}
+
 	private function sync_variations( $target_parent_id, $source_parent_id ) {
 		$this->variations_fetch_error = false;
+		$this->last_variation_count   = 0;
 		$source_vars = $this->fetch_variations( $source_parent_id );
+		// A failed variations fetch (401/timeout) used to be silent: no children written, but the run
+		// still counted the parent as a clean sync — shipping an empty, unpurchasable variable product
+		// (issue #15). Treat it like a failed variation so it is counted as an error and surfaced.
+		if ( $this->variations_fetch_error ) {
+			$this->last_variation_failed = true;
+		}
 		$parent      = wc_get_product( $target_parent_id );
 		if ( ! $parent ) {
-			return;
+			return false;
 		}
 
 		$by_sku = array();
@@ -2811,11 +2867,12 @@ $defaults = array(
 
 		$kept = array();
 		foreach ( $source_vars as $sv ) {
+			$vid = null; // resolved match for THIS source variation; reset before any throw point so
+			             // the catch never keeps a stale id from a previous iteration.
 			try {
 				$svsku   = isset( $sv['sku'] ) ? trim( $sv['sku'] ) : '';
 				$attrs   = $this->build_variation_attributes( $sv['attributes'] ?? array() );
 				$sig     = $this->signature( $attrs );
-				$vid     = null;
 
 				if ( $svsku && isset( $by_sku[ $svsku ] ) ) {
 					$vid = $by_sku[ $svsku ];
@@ -2870,7 +2927,13 @@ $defaults = array(
 
 		if ( $this->fast_mode ) {
 			// Fast field-refresh is update-only — leave variation add/remove to the daily full sync.
-		} elseif ( ! $this->variations_fetch_error ) {
+		} elseif ( ! $this->variations_fetch_error && ! $this->last_variation_failed ) {
+			// Only prune stale children when EVERY source variation was written successfully. If any
+			// save failed (#15 — most often WC's "Invalid or duplicated SKU" when another product
+			// already holds that SKU), the failed ones are missing from $kept, so pruning would delete
+			// the existing variations they were meant to replace and leave an empty variable product.
+			// Keeping the old variations and reporting the error is always safer than destroying them;
+			// a later clean run prunes anything genuinely removed from the source.
 			foreach ( $parent->get_children() as $vid ) {
 				if ( empty( $kept[ $vid ] ) ) {
 					$stale = wc_get_product( $vid );
@@ -2882,9 +2945,11 @@ $defaults = array(
 				}
 			}
 		} else {
-			$this->log( 'warning', sprintf( 'Błąd pobierania wariacji rodzica %d – pomijam usuwanie dzieci.', $target_parent_id ) );
+			$reason = $this->variations_fetch_error ? 'błąd pobrania wariacji' : 'część wariacji nie zapisała się';
+			$this->log( 'warning', sprintf( 'Rodzic %d: %s – pomijam usuwanie dzieci (zachowuję istniejące wariacje).', $target_parent_id, $reason ) );
 		}
 
+		$this->last_variation_count = count( $kept );
 		return $rollup_dirty;
 	}
 
