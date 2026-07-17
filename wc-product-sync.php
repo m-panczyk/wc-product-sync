@@ -195,12 +195,21 @@ final class WC_Product_Sync {
 		$opts   = get_option( self::OPTION_KEY, array() );
 		$hour   = isset( $opts['cron_hour'] ) ? (int) $opts['cron_hour'] : 3;
 		$minute = isset( $opts['cron_minute'] ) ? (int) $opts['cron_minute'] : 0;
-		$now    = time();
-		$today  = mktime( $hour, $minute, 0, gmdate( 'n', $now ), gmdate( 'j', $now ), gmdate( 'Y', $now ) );
-		if ( $today <= $now ) {
-			$today = strtotime( '+1 day', $today );
+		wp_schedule_event( self::compute_next_run_ts( $hour, $minute ), 'daily', self::CRON_HOOK );
+	}
+
+	/** UTC timestamp of the next $hour:$minute in the SITE's timezone (not UTC). WordPress runs PHP in
+	 *  UTC, so mktime()/strtotime() would read the chosen hour as UTC and land the run at the wrong
+	 *  wall-clock time on any non-UTC site — the "shows 03:00 for 01:00" bug. Anchoring to wp_timezone()
+	 *  makes the configured hour mean what the UI label ("Domena czasu WordPress") promises. */
+	private static function compute_next_run_ts( $hour, $minute ) {
+		$tz     = wp_timezone();
+		$now    = new DateTimeImmutable( 'now', $tz );
+		$target = $now->setTime( (int) $hour, (int) $minute, 0 );
+		if ( $target <= $now ) {
+			$target = $target->modify( '+1 day' );
 		}
-		wp_schedule_event( $today, 'daily', self::CRON_HOOK );
+		return $target->getTimestamp();
 	}
 
 	public static function deactivate() {
@@ -209,14 +218,32 @@ final class WC_Product_Sync {
 	}
 
 	public function sync_cron_schedule() {
-		$enabled   = ! empty( $this->get_options()['schedule_enabled'] );
-		$scheduled = (bool) wp_next_scheduled( self::CRON_HOOK );
-		if ( $enabled && ! $scheduled ) {
+		$enabled = ! empty( $this->get_options()['schedule_enabled'] );
+		$next    = wp_next_scheduled( self::CRON_HOOK );
+		if ( ! $enabled ) {
+			if ( $next ) {
+				wp_clear_scheduled_hook( self::CRON_HOOK );
+			}
+		} elseif ( ! $next ) {
 			$this->schedule_next_run();
-		} elseif ( ! $enabled && $scheduled ) {
+		} elseif ( ! $this->cron_time_matches( $next ) ) {
+			// The daily event exists but at a different time than the saved hour/minute — a changed
+			// setting. Move it (clear + reschedule); without this, editing the time never took effect
+			// on an already-scheduled event, which is the "settings do nothing" half of the bug.
 			wp_clear_scheduled_hook( self::CRON_HOOK );
+			$this->schedule_next_run();
+			$this->log( 'info', 'Zmieniono godzinę harmonogramu — przeplanowano codzienną synchronizację.' );
 		}
 		$this->reconcile_fast_cron();
+	}
+
+	/** True when the scheduled event's LOCAL wall-clock time equals the configured hour:minute. */
+	private function cron_time_matches( $ts ) {
+		$opts   = $this->get_options();
+		$hour   = isset( $opts['cron_hour'] ) ? (int) $opts['cron_hour'] : 3;
+		$minute = isset( $opts['cron_minute'] ) ? (int) $opts['cron_minute'] : 0;
+		$local  = ( new DateTimeImmutable( '@' . (int) $ts ) )->setTimezone( wp_timezone() );
+		return (int) $local->format( 'G' ) === $hour && (int) $local->format( 'i' ) === $minute;
 	}
 
 	/** Register the dynamic cron schedule used by the fast field-refresh sync. Its interval always
@@ -262,13 +289,9 @@ final class WC_Product_Sync {
 	private function schedule_next_run() {
 		$hour   = (int) $this->get_options()['cron_hour'];
 		$minute = (int) $this->get_options()['cron_minute'];
-		$now    = time();
-		$today  = mktime( $hour, $minute, 0, gmdate( 'n', $now ), gmdate( 'j', $now ), gmdate( 'Y', $now ) );
-		if ( $today <= $now ) {
-			$today = strtotime( '+1 day', $today );
-		}
-		wp_schedule_event( $today, 'daily', self::CRON_HOOK );
-		$this->log( 'info', sprintf( 'Zaplanowano sync: o %02d:%02d (dzisiaj/jutro)', $hour, $minute ) );
+		$ts     = self::compute_next_run_ts( $hour, $minute );
+		wp_schedule_event( $ts, 'daily', self::CRON_HOOK );
+		$this->log( 'info', sprintf( 'Zaplanowano sync: %s (czas lokalny).', wp_date( 'Y-m-d H:i', $ts ) ) );
 	}
 
 	/* =====================================================================

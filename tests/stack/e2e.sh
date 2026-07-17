@@ -852,5 +852,43 @@ echo "    adopted Plaszcz #$PID_B children=$KIDS_B (must stay 2, not wiped)  err
 [ "$NPROD_B" -eq 1 ] || { echo "  FAIL: expected 1 'Plaszcz' (adopted by name), got $NPROD_B" >&2; exit 1; }
 echo "  PASS: duplicated-SKU variation failure preserved the existing variations + reported an error (no empty parent)"
 
+# --- Phase 12: daily schedule honors the hour setting AND the site timezone (issue #12) ------
+#
+# Two bugs this locks down: (a) changing the hour never rescheduled an already-scheduled daily event
+# (the reconciler only acted when nothing was scheduled), and (b) the hour was built with mktime()
+# over gmdate() parts, i.e. read as UTC, while the UI labels it site-local — so on a +2 timezone,
+# entering 01:00 produced a 03:00 run. Set a non-UTC timezone and assert the event lands at the LOCAL
+# hour, then that editing the hour MOVES it.
+echo "==> Phase 12: daily schedule respects hour + site timezone, reschedules on change (issue #12)"
+HOOK="wc_product_sync_daily_event"
+twp option update timezone_string Europe/Warsaw >/dev/null
+opt schedule_enabled 1
+opt cron_hour 1
+opt cron_minute 30
+
+SCHED1="$(twp eval '
+wp_clear_scheduled_hook("'"$HOOK"'");
+$s=WC_Product_Sync::instance();
+$m=new ReflectionMethod("WC_Product_Sync","sync_cron_schedule");$m->setAccessible(true);$m->invoke($s);
+$ts=wp_next_scheduled("'"$HOOK"'");
+if(!$ts){echo "none";exit;}
+echo (new DateTimeImmutable("@".$ts))->setTimezone(wp_timezone())->format("H:i");')"
+echo "    tz=Europe/Warsaw, set 01:30 → next run local $SCHED1"
+[ "$SCHED1" = "01:30" ] || { echo "  FAIL: scheduled local time $SCHED1, expected 01:30 (hour read as UTC, not site tz)" >&2; exit 1; }
+
+opt cron_hour 5
+SCHED2="$(twp eval '
+$s=WC_Product_Sync::instance();
+$m=new ReflectionMethod("WC_Product_Sync","sync_cron_schedule");$m->setAccessible(true);$m->invoke($s);
+$ts=wp_next_scheduled("'"$HOOK"'");
+echo $ts ? (new DateTimeImmutable("@".$ts))->setTimezone(wp_timezone())->format("H:i") : "none";')"
+echo "    changed hour to 05 → next run local $SCHED2"
+[ "$SCHED2" = "05:30" ] || { echo "  FAIL: schedule did not move to 05:30 (got $SCHED2) — edit-the-hour still does nothing" >&2; exit 1; }
+
+# Clean up: restore UTC and clear the hook so it can't fire during later work.
+twp option update timezone_string "" >/dev/null
+twp eval 'wp_clear_scheduled_hook("'"$HOOK"'");' >/dev/null
+echo "  PASS: hour honored in site tz (01:30), editing the hour moved the run to 05:30"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule)"
