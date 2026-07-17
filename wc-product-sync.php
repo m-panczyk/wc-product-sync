@@ -104,6 +104,8 @@ final class WC_Product_Sync {
 	private $last_image_failed = false;
 	/** Czy przy ostatnim produkcie poległa którakolwiek wariacja (→ liczone jako błąd) */
 	private $last_variation_failed = false;
+	/** Ile wariacji faktycznie zsynchronizowano dla ostatniego produktu zmiennego (0 = puste/awaria) */
+	private $last_variation_count = 0;
 	/** Lokalne ID ostatnio zapisanego produktu (create lub update) — do znakowania _wps_created_run */
 	private $last_saved_id = 0;
 	/** started_at bieżącego przebiegu; ten sam we wszystkich batchach (z SYNC_LAST_RESULT) */
@@ -2539,6 +2541,17 @@ $defaults = array(
 		}
 		if ( 'WC_Product_Variable' === $wanted_class ) {
 			$this->sync_variations( $id, (int) $p['id'] );
+			// Never persist a NEW variable product with zero variations — that is the broken,
+			// unpurchasable "empty parent" from issue #15. It happens when the source /variations
+			// endpoint errors (401/timeout) or returns nothing. Remove what we just created (parent +
+			// any partially-written children) and fail loudly, so it is counted as an error and
+			// retried next run instead of leaving a dead product in the catalog.
+			if ( $this->variations_fetch_error || 0 === $this->last_variation_count ) {
+				$this->delete_product_with_children( $id );
+				throw new \RuntimeException( $this->variations_fetch_error
+					? 'Nie udało się pobrać wariacji ze źródła — produkt wariantowy NIE został utworzony (uniknięto pustego produktu).'
+					: 'Źródłowy produkt wariantowy nie ma żadnych wariacji — NIE utworzono (uniknięto pustego produktu).' );
+			}
 			WC_Product_Variable::sync( $id );
 		}
 
@@ -2720,12 +2733,32 @@ $defaults = array(
 		return 0;
 	}
 
+	/** Permanently delete a product and every variation child, leaving no orphaned rows. */
+	private function delete_product_with_children( $product_id ) {
+		$product = wc_get_product( $product_id );
+		if ( $product ) {
+			foreach ( $product->get_children() as $child_id ) {
+				wp_delete_post( $child_id, true );
+			}
+			$product->delete( true );
+		} else {
+			wp_delete_post( $product_id, true );
+		}
+	}
+
 	private function sync_variations( $target_parent_id, $source_parent_id ) {
 		$this->variations_fetch_error = false;
+		$this->last_variation_count   = 0;
 		$source_vars = $this->fetch_variations( $source_parent_id );
+		// A failed variations fetch (401/timeout) used to be silent: no children written, but the run
+		// still counted the parent as a clean sync — shipping an empty, unpurchasable variable product
+		// (issue #15). Treat it like a failed variation so it is counted as an error and surfaced.
+		if ( $this->variations_fetch_error ) {
+			$this->last_variation_failed = true;
+		}
 		$parent      = wc_get_product( $target_parent_id );
 		if ( ! $parent ) {
-			return;
+			return false;
 		}
 
 		$by_sku = array();
@@ -2752,11 +2785,12 @@ $defaults = array(
 
 		$kept = array();
 		foreach ( $source_vars as $sv ) {
+			$vid = null; // resolved match for THIS source variation; reset before any throw point so
+			             // the catch never keeps a stale id from a previous iteration.
 			try {
 				$svsku   = isset( $sv['sku'] ) ? trim( $sv['sku'] ) : '';
 				$attrs   = $this->build_variation_attributes( $sv['attributes'] ?? array() );
 				$sig     = $this->signature( $attrs );
-				$vid     = null;
 
 				if ( $svsku && isset( $by_sku[ $svsku ] ) ) {
 					$vid = $by_sku[ $svsku ];
@@ -2811,7 +2845,13 @@ $defaults = array(
 
 		if ( $this->fast_mode ) {
 			// Fast field-refresh is update-only — leave variation add/remove to the daily full sync.
-		} elseif ( ! $this->variations_fetch_error ) {
+		} elseif ( ! $this->variations_fetch_error && ! $this->last_variation_failed ) {
+			// Only prune stale children when EVERY source variation was written successfully. If any
+			// save failed (#15 — most often WC's "Invalid or duplicated SKU" when another product
+			// already holds that SKU), the failed ones are missing from $kept, so pruning would delete
+			// the existing variations they were meant to replace and leave an empty variable product.
+			// Keeping the old variations and reporting the error is always safer than destroying them;
+			// a later clean run prunes anything genuinely removed from the source.
 			foreach ( $parent->get_children() as $vid ) {
 				if ( empty( $kept[ $vid ] ) ) {
 					$stale = wc_get_product( $vid );
@@ -2823,9 +2863,11 @@ $defaults = array(
 				}
 			}
 		} else {
-			$this->log( 'warning', sprintf( 'Błąd pobierania wariacji rodzica %d – pomijam usuwanie dzieci.', $target_parent_id ) );
+			$reason = $this->variations_fetch_error ? 'błąd pobrania wariacji' : 'część wariacji nie zapisała się';
+			$this->log( 'warning', sprintf( 'Rodzic %d: %s – pomijam usuwanie dzieci (zachowuję istniejące wariacje).', $target_parent_id, $reason ) );
 		}
 
+		$this->last_variation_count = count( $kept );
 		return $rollup_dirty;
 	}
 
