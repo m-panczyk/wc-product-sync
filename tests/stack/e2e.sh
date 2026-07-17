@@ -766,5 +766,53 @@ echo "    empty source reports=$EMPTY_CNT  (guard refuses when < 1); target stil
 [ "$TGT_BEFORE_GUARD" -eq 3 ] || { echo "  FAIL: target catalog changed while probing an empty source ($TGT_BEFORE_GUARD)" >&2; exit 1; }
 echo "  PASS: empty source → count 0 → total sync would refuse (no catalog wipe)"
 
+# --- Phase 11: a variable product whose /variations fetch fails must NOT ship empty (issue #15) --
+#
+# When the source /variations endpoint errors (e.g. a key that reads /products but not variations,
+# same split-permission trap as /products/attributes) the plugin used to create the parent anyway
+# with zero variations — a broken, unpurchasable "empty parent", and the run still reported błędy=0.
+# Now that create is aborted (parent + partial children removed) and counted as an error; the next
+# clean run rebuilds it fully.
+echo "==> Phase 11: variations-fetch failure must not create an empty variable product (issue #15)"
+
+# Fresh source catalog: one variable product with 2 variations.
+swp eval '
+foreach ( get_posts(array("post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids")) as $id ){ wp_delete_post($id,true); }
+$p=new WC_Product_Variable(); $p->set_name("Var Guard"); $p->set_sku("VARGUARD-1"); $p->set_status("publish");
+$a=new WC_Product_Attribute(); $a->set_name("Size"); $a->set_options(array("S","M")); $a->set_visible(true); $a->set_variation(true);
+$p->set_attributes(array($a)); $pid=$p->save();
+foreach(array("S","M") as $opt){ $v=new WC_Product_Variation(); $v->set_parent_id($pid); $v->set_sku("VARGUARD-1-$opt"); $v->set_attributes(array("size"=>strtolower($opt))); $v->set_regular_price("20"); $v->set_status("publish"); $v->save(); }
+' >/dev/null
+
+# Clear the target of this product and block the source /variations endpoint (returns 401).
+twp eval '$id=wc_get_product_id_by_sku("VARGUARD-1"); if($id){wp_delete_post($id,true);} foreach(glob(WP_CONTENT_DIR."/uploads/wc-logs/wc-product-sync*.log") as $f){unlink($f);}' >/dev/null
+cat > /tmp/wps-block-vars.php <<'PHP'
+<?php
+// Test rig only: return the 401 a key without variations access gets, for any /products/<id>/variations.
+add_filter( 'rest_pre_dispatch', function ( $result, $server, $request ) {
+	if ( preg_match( '#^/wc/v3/products/\d+/variations#', $request->get_route() ) ) {
+		return new WP_Error( 'woocommerce_rest_cannot_view', 'Przepraszamy, ale nie możesz listować zasobów.', array( 'status' => 401 ) );
+	}
+	return $result;
+}, 10, 3 );
+PHP
+docker compose cp /tmp/wps-block-vars.php src-wp:/var/www/html/wp-content/mu-plugins/wps-block-vars.php >/dev/null
+
+opt per_page 10; opt sync_batch_limit 100; opt max_batch_seconds 0; opt force_full_sync 0; opt deletion_mode none
+drive >/dev/null
+PRESENT="$(twp eval '$id=wc_get_product_id_by_sku("VARGUARD-1"); echo $id?"yes":"no";')"
+ERRS="$(twp eval '$r=get_option("wps_last_sync_result"); echo (int)($r["errors"]??0);')"
+echo "    /variations blocked → product present=$PRESENT  errors=$ERRS"
+[ "$PRESENT" = "no" ] || { echo "  FAIL: an empty variable product was created despite the variations fetch failing" >&2; exit 1; }
+[ "$ERRS" -ge 1 ] || { echo "  FAIL: variations-fetch failure was not counted as an error (silent success)" >&2; exit 1; }
+
+# Unblock and re-sync: the product now syncs WITH its variations (recovery, no dead product left behind).
+docker compose exec -T -u 0 src-wp rm -f /var/www/html/wp-content/mu-plugins/wps-block-vars.php >/dev/null
+drive >/dev/null
+RECOVERED="$(twp eval '$id=wc_get_product_id_by_sku("VARGUARD-1"); $p=$id?wc_get_product($id):null; echo $p?count($p->get_children()):"gone";')"
+echo "    after unblocking → variations synced=$RECOVERED"
+[ "$RECOVERED" = "2" ] || { echo "  FAIL: recovery re-sync did not restore the 2 variations (got $RECOVERED)" >&2; exit 1; }
+echo "  PASS: variations-fetch failure aborted the empty create + counted an error; recovered cleanly next run"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity)"
