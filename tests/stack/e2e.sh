@@ -890,5 +890,46 @@ twp option update timezone_string "" >/dev/null
 twp eval 'wp_clear_scheduled_hook("'"$HOOK"'");' >/dev/null
 echo "  PASS: hour honored in site tz (01:30), editing the hour moved the run to 05:30"
 
+# --- Phase 13: price modifier — % + fixed amount + rounding (issue #14) ---------------------
+#
+# new_price = source * (1 + pct/100) + fixed, then rounded. Applies to regular + sale, simple +
+# variations. Assert the formula, a rounding mode, and that the default (0% + 0) is a no-op. The
+# modifier always derives from the SOURCE price each run, so it is idempotent (never compounds).
+echo "==> Phase 13: price modifier (% + fixed + rounding) (issue #14)"
+swp eval '
+foreach ( get_posts(array("post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids")) as $id ){ wp_delete_post($id,true); }
+$p=new WC_Product_Simple(); $p->set_name("Price Mod"); $p->set_sku("PMOD-1"); $p->set_regular_price("100"); $p->set_sale_price("80"); $p->set_status("publish"); $p->save();
+' >/dev/null
+twp eval '$id=wc_get_product_id_by_sku("PMOD-1"); if($id){wp_delete_post($id,true);}' >/dev/null
+opt per_page 10; opt sync_batch_limit 100; opt max_batch_seconds 0; opt force_full_sync 0; opt deletion_mode none
+
+# +10% then +5, standard rounding: regular 100→115, sale 80→93.
+opt price_markup_pct 10
+opt price_markup_fixed 5
+opt price_rounding standard
+drive >/dev/null
+REG="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_regular_price():"gone";')"
+SALE="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_sale_price():"gone";')"
+echo "    +10%+5 → regular=$REG (exp 115)  sale=$SALE (exp 93)"
+[ "$REG" = "115" ] || { echo "  FAIL: regular price modifier wrong (got $REG, expected 115)" >&2; exit 1; }
+[ "$SALE" = "93" ]  || { echo "  FAIL: sale price modifier wrong (got $SALE, expected 93)" >&2; exit 1; }
+
+# Charm (.99) rounding: 100*1.10 = 110 → 110.99.
+opt price_markup_fixed 0
+opt price_rounding charm
+drive >/dev/null
+CHARM="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_regular_price():"gone";')"
+echo "    charm → regular=$CHARM (exp 110.99)"
+[ "$CHARM" = "110.99" ] || { echo "  FAIL: charm rounding wrong (got $CHARM, expected 110.99)" >&2; exit 1; }
+
+# Default (0% + 0) copies the source price unchanged — proves it re-derives from source, no compounding.
+opt price_markup_pct 0
+opt price_rounding standard
+drive >/dev/null
+NOOP="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_regular_price():"gone";')"
+echo "    reset to defaults → regular=$NOOP (exp 100)"
+[ "$NOOP" = "100" ] || { echo "  FAIL: default (0%,0) must copy the source price unchanged (got $NOOP, expected 100)" >&2; exit 1; }
+echo "  PASS: % + fixed (115/93), charm rounding (110.99), default no-op (100), idempotent from source"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod)"

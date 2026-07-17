@@ -2,6 +2,14 @@
 
 ### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, total sync, [krytyczne] naprawa dopasowania po nazwie
 
+- **Modyfikator ceny przy synchronizacji (#14).** Nowe ustawienie „Modyfikator ceny": **procent** i/lub
+  **kwota stała** względem źródła, z wyborem **zaokrąglenia** (standardowo 2 miejsca / do pełnych /
+  końcówka ,99 / bez). Wzór: `cena celu = cena źródła × (1 + procent/100) + kwota stała`, potem
+  zaokrąglenie; dotyczy ceny **regularnej i promocyjnej**, produktów **prostych i wariacji**. Wartości
+  ujemne obniżają cenę (wynik nie spada poniżej 0). Zawsze liczone od **ceny źródła** przy każdym
+  przebiegu, więc jest **idempotentne** (nie kumuluje się). Domyślnie (0% + 0) cena jest kopiowana
+  **bez zmian** — bez wpływu na istniejące instalacje. Działa tylko przy włączonym polu „Cena".
+  Zweryfikowane e2e (+10%+5 → 115/93, końcówka ,99 → 110.99, domyślnie bez zmian).
 - **[krytyczne] Nieudany zapis wariacji nie kasuje już istniejących wariacji (#15).** Główna przyczyna
   „pustego produktu wariantowego" zgłoszona w #15: przy synchronizacji produktu zmiennego, gdy zapis
   wariacji **nie powiódł się** — najczęściej `Invalid or duplicated SKU`, bo SKU tej wariacji trzyma na
