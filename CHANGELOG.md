@@ -1,5 +1,22 @@
 ## Zmiany (Changelog)
 
+### 0.9.27-rc6 — kontrola propagacji cen promocyjnych ze źródła (#18)
+
+- **Tryb promocji** (`price_promotion_mode`) w sekcji „Modyfikator ceny" panelu wtyczki.
+  Gdy źródło wystawia produkt na promocję (`regular_price: 100`, `sale_price: 80`) można wybrać,
+  jak ma to być odzwierciedlone na celu:
+  - **Kopiuj promocję bez zmian (domyślne)** — kopiuje regular + sale, cel pokazuje wyprzedaż.
+    Zachowuje dotychczasowe zachowanie wtyczki (`keep`).
+  - **Cena promocyjna → podstawowa** — cena z pola `sale_price` na źródle staje się ceną regularną
+    na celu, pole promocyjne jest czyszczone (promocja „przepływa" do ceny bazowej).
+  - **Cena przed promocją → podstawowa** — cena `regular_price` zostaje jako regularna na celu,
+    pole promocyjne jest czyszczone (nie kopiujemy oznaczenia wyprzedaży).
+  Implementacja: nowe ustawienie `price_promotion_mode`, nowa metoda prywatna
+  `transform_promo_prices()` wstrzyknięta między pozyskiwanie źródła a WooCommerce
+  `set_regular_price()/set_sale_price()`, zaktualizowane trzy miejsca zapisu ceny (UPDATE prostego,
+  CREATE prostego, UPDATE wariacji). Tryb `keep` jest domyślny — **kompatybilne wstecz**, istniejące
+  instalacje nie widzą zmian.
+
 ### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, total sync, [krytyczne] naprawa dopasowania po nazwie
 
 - **Modyfikator ceny przy synchronizacji (#14).** Nowe ustawienie „Modyfikator ceny": **procent** i/lub

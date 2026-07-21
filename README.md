@@ -103,6 +103,38 @@ add_filter( 'wps_sync_statuses', function( $statuses ) {
 
 ---
 
+## Ceny: modyfikator i tryb promocji
+
+Sekcja **„Modyfikator ceny"** w ustawieniach kontroluje, jak ceny ze źródła trafiają na cel.
+Działa tylko, gdy pole **„Cena"** jest włączone; dotyczy ceny regularnej i promocyjnej, produktów
+prostych i wariacji.
+
+### Modyfikator (`price_markup_pct`, `price_markup_fixed`, `price_rounding`)
+
+Cena na celu = `cena źródła × (1 + procent/100) + kwota stała`, a następnie zaokrąglenie:
+
+- **`price_markup_pct`** — procent (może być ujemny, obniża cenę).
+- **`price_markup_fixed`** — kwota stała dodawana po procencie (może być ujemna).
+- **`price_rounding`** — `standard` (2 miejsca), `integer` (do pełnej), `charm` (końcówka `.99`), `none`.
+
+Domyślnie (`0%` + `0`, `standard`) cena jest kopiowana bez zmian. Wynik nigdy nie spada poniżej `0`.
+
+### Tryb promocji (`price_promotion_mode`)
+
+Steruje tym, jak promocja na źródle (np. `regular_price: 100`, `sale_price: 80`) jest odzwierciedlona
+na celu. Modyfikator powyżej jest stosowany **po** wybraniu ceny źródłowej.
+
+| Tryb | Cena regularna na celu | Cena promocyjna na celu | Zastosowanie |
+|---|---|---|---|
+| **`keep`** (domyślnie) | `regular_price` źródła | `sale_price` źródła | Kopiuj promocję bez zmian — cel pokazuje wyprzedaż. Zachowuje dotychczasowe zachowanie. |
+| **`promo_to_base`** | `sale_price` źródła | *(puste)* | Cena promocyjna staje się bazową — promocja „przepływa" do ceny podstawowej, bez oznaczenia wyprzedaży. |
+| **`base_after_promo`** | `regular_price` źródła | *(puste)* | Cena sprzed promocji zostaje bazową — nie kopiujemy oznaczenia wyprzedaży. |
+
+Gdy źródło **nie** jest na promocji (brak `sale_price`), wszystkie tryby dają ten sam wynik: cena
+regularna, bez promocji. `keep` jest domyślny — istniejące instalacje nie widzą zmiany zachowania.
+
+---
+
 ## Usuwanie produktów zniknętych ze źródła
 
 Zachowanie dla produktów, które istnieją lokalnie, ale zniknęły ze źródła, ustawia opcja **`deletion_mode`**:

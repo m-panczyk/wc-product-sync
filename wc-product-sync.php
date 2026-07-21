@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.27-rc5
+ * Version:           0.9.27-rc6
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
@@ -685,6 +685,29 @@ $defaults = array(
 				return (string) round( $val, 2 );
 		}
 	}
+	/** Transform source prices based on price_promotion_mode.
+	 *
+	 *  When the source has a sale item (regular_price=100, sale_price=80) the user may want:
+	 *   - keep         : copy as-is (current behaviour, default)
+	 *   - promo_to_base: use sale_price as the regular price, clear sale
+	 *   - base_after_promo: use regular_price, clear sale (source was on-sale, show pre-sale price)
+	 *
+	 *  Returns ['regular' => ..., 'sale' => ...] strings ready for set_regular_price()/set_sale_price().
+	 */
+	private function transform_promo_prices( array $p ) {
+		$reg = isset( $p['regular_price'] ) && '' !== $p['regular_price'] ? $p['regular_price'] : '';
+		$sal = isset( $p['sale_price'] )    && '' !== $p['sale_price']    ? $p['sale_price']    : '';
+		$mode = ( $this->get_options()['price_promotion_mode'] ?? 'keep' );
+
+		switch ( $mode ) {
+			case 'promo_to_base':
+				return array( 'regular' => '' !== $sal ? $sal : $reg, 'sale' => '' );
+			case 'base_after_promo':
+				return array( 'regular' => $reg, 'sale' => '' );
+			default: // keep
+				return array( 'regular' => $reg, 'sale' => $sal );
+		}
+	}
 
 	/** Should this data field be written? On CREATE everything is imported; on UPDATE a field
 	 *  disabled in settings is skipped, so local edits to it are preserved (#2). */
@@ -789,6 +812,9 @@ $defaults = array(
 		}
 		$pr = isset( $input['price_rounding'] ) ? $input['price_rounding'] : 'standard';
 		$out['price_rounding']  = in_array( $pr, array( 'standard', 'integer', 'charm', 'none' ), true ) ? $pr : 'standard';
+		// Promotion handling mode — controls how source sale_price → target regular/sale_price mapping.
+		$ppm = isset( $input['price_promotion_mode'] ) ? $input['price_promotion_mode'] : 'keep';
+		$out['price_promotion_mode'] = in_array( $ppm, array( 'keep', 'promo_to_base', 'base_after_promo' ), true ) ? $ppm : 'keep';
 		$uc = isset( $input['update_channel'] ) ? $input['update_channel'] : 'stable';
 		$out['update_channel']  = in_array( $uc, array( 'stable', 'rc' ), true ) ? $uc : 'stable';
 		// Switching channel must take effect now, not after the 12h metadata cache — drop it so the
@@ -1175,6 +1201,13 @@ $defaults = array(
 							<p class="description">
 								<?php esc_html_e( 'Cena na celu = cena źródła × (1 + procent/100) + kwota stała, potem zaokrąglenie. Dotyczy ceny regularnej i promocyjnej, produktów prostych i wariacji. Wartości ujemne obniżają cenę; wynik nigdy nie spada poniżej 0. Domyślnie (0% + 0) cena jest kopiowana bez zmian. Działa tylko, gdy pole „Cena" powyżej jest włączone.', 'wc-product-sync' ); ?>
 							</p>
+						<?php $wps_ppm = $opts['price_promotion_mode'] ?? "keep"; ?>
+						<p><label for="price_promotion_mode"><?php esc_html_e( "Tryb promocji:", "wc-product-sync" ); ?></label>
+						<select id="price_promotion_mode" name="wc_product_sync_options[price_promotion_mode]">
+							<option value="keep"<?php selected( $wps_ppm, "keep" ); ?>><?php esc_html_e( "Kopiuj promocję bez zmian (domyślne)", "wc-product-sync" ); ?></option>
+							<option value="promo_to_base"<?php selected( $wps_ppm, "promo_to_base" ); ?>><?php esc_html_e( "Cena promocyjna → podstawowa (usuń oznaczenie promocji)", "wc-product-sync" ); ?></option>
+							<option value="base_after_promo"<?php selected( $wps_ppm, "base_after_promo" ); ?>><?php esc_html_e( "Cena przed promocją → podstawowa (nie kopiuj promocji)", "wc-product-sync" ); ?></option>
+						</select></p>
 						</td>
 					</tr>
 					<tr>
@@ -2530,8 +2563,9 @@ $defaults = array(
 		}
 		if ( 'WC_Product_Simple' === $wanted_class ) {
 			if ( $this->field_on( 'price' ) ) {
-				$product->set_regular_price( isset( $p['regular_price'] ) ? $this->modify_price( $p['regular_price'] ) : '' );
-				$product->set_sale_price( isset( $p['sale_price'] ) ? $this->modify_price( $p['sale_price'] ) : '' );
+				$prices = $this->transform_promo_prices( $p );
+				$product->set_regular_price( '' !== $prices['regular'] ? $this->modify_price( $prices['regular'] ) : '' );
+				$product->set_sale_price(    '' !== $prices['sale']    ? $this->modify_price( $prices['sale'] )    : '' );
 			}
 			$this->apply_stock( $product, $p ); // self-gated by field_on('stock')
 		} elseif ( 'WC_Product_Variable' === $wanted_class ) {
@@ -2598,8 +2632,9 @@ $defaults = array(
 		}
 		if ( 'WC_Product_Simple' === $wanted_class ) {
 			if ( $this->field_on( 'price' ) ) {
-				$product->set_regular_price( isset( $p['regular_price'] ) ? $this->modify_price( $p['regular_price'] ) : '' );
-				$product->set_sale_price( isset( $p['sale_price'] ) ? $this->modify_price( $p['sale_price'] ) : '' );
+				$prices = $this->transform_promo_prices( $p );
+				$product->set_regular_price( '' !== $prices['regular'] ? $this->modify_price( $prices['regular'] ) : '' );
+				$product->set_sale_price(    '' !== $prices['sale']    ? $this->modify_price( $prices['sale'] )    : '' );
 			}
 			$this->apply_stock( $product, $p ); // self-gated by field_on('stock')
 		} elseif ( 'WC_Product_Variable' === $wanted_class ) {
@@ -2896,8 +2931,9 @@ $defaults = array(
 				}
 				$variation->set_status( ( $sv['status'] ?? 'publish' ) === 'private' ? 'private' : 'publish' );
 				if ( $this->field_on( 'price' ) ) {
-					$variation->set_regular_price( isset( $sv['regular_price'] ) ? $this->modify_price( $sv['regular_price'] ) : '' );
-					$variation->set_sale_price( isset( $sv['sale_price'] ) ? $this->modify_price( $sv['sale_price'] ) : '' );
+					$prices = $this->transform_promo_prices( $sv );
+					$variation->set_regular_price( '' !== $prices['regular'] ? $this->modify_price( $prices['regular'] ) : '' );
+					$variation->set_sale_price(    '' !== $prices['sale']    ? $this->modify_price( $prices['sale'] )    : '' );
 				}
 				$this->apply_stock( $variation, $sv );
 				$this->apply_physical( $variation, $sv );
