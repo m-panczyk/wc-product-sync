@@ -2449,10 +2449,14 @@ $defaults = array(
 			// on the target that meant every unmatched source product falsely matched it (wrong
 			// product overwritten); with many, it always saw 2 and never matched (SKU-less/renamed
 			// products duplicated instead). The whole name fallback never actually matched by name.
-			$found   = get_posts( array(
+			// Use the same status set the run is syncing (wps_sync_statuses), not just 'publish',
+			// so SKU-less drafts/private products are found under their non-publish status too.
+			$sync_statuses = apply_filters( 'wps_sync_statuses', (array) $this->get_options()['sync_statuses'], '' );
+			$post_status   = ! empty( $sync_statuses ) ? array_unique( (array) $sync_statuses ) : array( 'publish' );
+			$found         = get_posts( array(
 				'post_type'      => 'product',
 				'title'          => $name,
-				'post_status'    => 'publish',
+				'post_status'    => $post_status,
 				'posts_per_page' => 2,
 				'fields'         => 'ids',
 			) );
