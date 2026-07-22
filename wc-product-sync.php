@@ -742,23 +742,44 @@ $defaults = array(
 		return ( 'hard' === ( $this->get_options()['deletion_mode'] ?? 'none' ) ) ? 'hard' : 'soft';
 	}
 
-	/** Returns true when the URL scheme is not https://.
-	 *  Used at settings-save time to surface a prominent admin warning. */
+	/** Returns true when the URL scheme is not https:// AND the host is
+	 *  not a private/local address.  Used at settings-save time to surface
+	 *  a prominent admin warning (HTTP on public hosts = danger). */
 	private function source_url_is_insecure( $url ) {
 		$url = trim( (string) $url );
 		if ( '' === $url ) {
 			return false;
 		}
 		$scheme = wp_parse_url( $url, PHP_URL_SCHEME );
-		return 'https' !== strtolower( (string) $scheme );
+		// Only flag as insecure when not HTTPS — private hosts are
+		// allowed for local development / staging without TLS.
+		if ( 'https' === strtolower( (string) $scheme ) ) {
+			return false;
+		}
+		$host = wp_parse_url( $url, PHP_URL_HOST );
+		if ( ! empty( $host ) && $this->is_private_host( $host ) ) {
+			return false; // local dev / staging OK with HTTP.
+		}
+		return true;
 	}
 
-	/** Returns true when the URL scheme is not https://.
-	 *  Used at request time by api_get() to hard-block — no exceptions for
-	 *  local/private hosts: even LAN traffic can be sniffed and the same
-	 *  code path fires in cron, so the operator must use TLS everywhere. */
-	private function source_url_requires_https( $url ) {
-		return $this->source_url_is_insecure( $url );
+	/** True when the host is a private / loopback address (RFC 1918, IPv6
+	 *  loopback ::1, or "localhost" string). */
+	private function is_private_host( $host ) {
+		$host = strtolower( trim( (string) $host ) );
+		if ( 'localhost' === $host || '::1' === $host ) {
+			return true;
+		}
+		// IPv4 private ranges: 10.x, 172.16-31.x, 192.168.x
+		if ( preg_match( '/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/', $host, $m ) ) {
+			$a = (int) $m[1];
+			$b = (int) $m[2];
+			if ( 10 === $a ) return true;                          // 10.0.0.0/8
+			if ( 172 === $a && $b >= 16 && $b <= 31 ) return true; // 172.16.0.0/12
+			if ( 192 === $a && 168 === $b ) return true;           // 192.168.0.0/16
+			if ( 0 === $a && 0 === $b && 0 === $c && 0 === $d ) return false; // not caught above, just in case
+		}
+		return false;
 	}
 
 	/* =====================================================================
@@ -1738,8 +1759,9 @@ $defaults = array(
 	private function api_get( $path, array $query = array() ) {
 		$url  = add_query_arg( $query, $this->cfg_source_url() . $path );
 
-		// Hard-block non-HTTPS requests — Basic auth keys travel in cleartext.
-		if ( $this->source_url_requires_https( $this->cfg_source_url() ) ) {
+		// Hard-block non-HTTPS requests to public hosts — Basic auth keys travel in cleartext.
+		// Local/private hosts are exempt (already checked inside source_url_is_insecure).
+		if ( $this->source_url_is_insecure( $this->cfg_source_url() ) ) {
 			return new WP_Error( 'wps_insecure_url',
 				sprintf(
 					/* translators: %s: the configured source URL */
