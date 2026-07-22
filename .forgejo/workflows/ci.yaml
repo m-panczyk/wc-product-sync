@@ -40,6 +40,15 @@ jobs:
           php -l wc-product-sync.php
           for f in tests/*.php; do php -l "$f"; done
 
+      # Coding standards lint — non-blocking while we size the existing backlog.
+      # Composer is not baked into the runner image; install it here.
+      - name: PHPCS (WordPress coding standards)
+        continue-on-error: true
+        run: |
+          curl -sS https://getcomposer.org/installer | php -- --quiet
+          php composer.phar install --no-interaction --prefer-dist --optimize-autoloader
+          php composer.phar phpcs -- -s
+
       - name: Shell syntax
         run: |
           for f in build.sh publish.sh tests/*.sh; do bash -n "$f"; done
