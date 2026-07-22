@@ -764,21 +764,28 @@ $defaults = array(
 	}
 
 	/** True when the host is a private / loopback address (RFC 1918, IPv6
-	 *  loopback ::1, or "localhost" string). */
+	 *  loopback ::1, or "localhost" string). Also true for hosts that look
+	 *  like internal Docker/container service names (no dots = no public TLD). */
 	private function is_private_host( $host ) {
 		$host = strtolower( trim( (string) $host ) );
 		if ( 'localhost' === $host || '::1' === $host ) {
 			return true;
 		}
-		// IPv4 private ranges: 10.x, 172.16-31.x, 192.168.x
+		// Docker / container service names, short hostnames — no TLD dot present.
+		if ( false === strpos( $host, '.' ) ) {
+			return true;
+		}
+		// IPv4 private ranges: 10.x, 172.16-31.x, 192.168.x, 169.254.x (link-local), 127.x.x (loopback)
 		if ( preg_match( '/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/', $host, $m ) ) {
 			$a = (int) $m[1];
 			$b = (int) $m[2];
 			$c = (int) $m[3];
 			$d = (int) $m[4];
-			if ( 10 === $a ) return true;                          // 10.0.0.0/8
-			if ( 172 === $a && $b >= 16 && $b <= 31 ) return true; // 172.16.0.0/12
-			if ( 192 === $a && 168 === $b ) return true;           // 192.168.0.0/16
+			if ( 10 === $a ) return true;                            // 10.0.0.0/8
+			if ( 172 === $a && $b >= 16 && $b <= 31 ) return true;   // 172.16.0.0/12
+			if ( 192 === $a && 168 === $b ) return true;             // 192.168.0.0/16
+			if ( 169 === $a && 254 === $b ) return true;             // 169.254.0.0/16 link-local
+			if ( 127 === $a ) return true;                           // 127.0.0.0/8 loopback
 			if ( 0 === $a && 0 === $b && 0 === $c && 0 === $d ) return false; // not caught above, just in case
 		}
 		return false;
