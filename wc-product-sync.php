@@ -580,6 +580,8 @@ $defaults = array(
 		'price_markup_pct'    => 0,          // percentage, may be negative (e.g. -10 = 10% cheaper)
 		'price_markup_fixed'  => 0,          // fixed amount added after the percentage, may be negative
 		'price_rounding'      => 'standard', // standard (2 dp) | integer | charm (.99) | none
+		'price_promotion_mode' => 'keep', // keep / promo_to_base / base_after_promo
+		'price_promotion_mode' => 'keep', // keep / promo_to_base / base_after_promo
 		// Update channel: 'stable' (latest) or 'rc' (latest-beta). Overridden by the
 		// WC_PRODUCT_SYNC_UPDATE_URL constant when it is defined.
 		'update_channel'      => 'stable',
@@ -774,6 +776,8 @@ $defaults = array(
 		if ( preg_match( '/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/', $host, $m ) ) {
 			$a = (int) $m[1];
 			$b = (int) $m[2];
+			$c = (int) $m[3];
+			$d = (int) $m[4];
 			if ( 10 === $a ) return true;                          // 10.0.0.0/8
 			if ( 172 === $a && $b >= 16 && $b <= 31 ) return true; // 172.16.0.0/12
 			if ( 192 === $a && 168 === $b ) return true;           // 192.168.0.0/16

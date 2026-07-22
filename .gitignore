@@ -15,3 +15,9 @@ metrics/*.csv
 !docs/PERFORMANCE.md
 *.txt
 tests/stack/.env
+
+# Development tooling state (never ship)
+.claude/
+.hermes/agent-state.json
+.hermes/post_review.py
+scripts/force_reset.py
