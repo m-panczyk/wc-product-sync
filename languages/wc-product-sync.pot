@@ -1,0 +1,254 @@
+# Translation file for WC Product Sync (SKU) WordPress plugin.
+# Copyright (C) 2024 Michał Pańczyk
+# This file is distributed under the GNU General Public License v2 or later.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: WC Product Sync (SKU) 0.9.27-rc6\n"
+"POT-Creation-Date: 2026-07-22 17:42\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: pl_PL\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: Hermes Agent (manual extraction)\n"
+"Plural-Forms: nplurals=3; plural=(n==1) ? 0 : (n%10>=2 && n%10<=4 && (n%100<12 || n%100>14)) ? 1 : 2;\n"
+
+# Line 256
+msgid "Co %d min (WC Product Sync)"
+msgstr ""
+
+# Line 778
+msgid "Uwaga: URL źródła używa HTTP — klucze API są przesyłane jawnie. Użyj HTTPS."
+msgstr ""
+
+# Line 870
+msgid "Synchronizacja produktów"
+msgstr ""
+
+# Line 880
+msgid "WC Product Sync wymaga aktywnego WooCommerce."
+msgstr ""
+
+# Line 933
+msgid "Synchronizacja w toku"
+msgstr ""
+
+# Line 936
+msgid "Uruchamianie — pobieranie danych ze źródła…"
+msgstr ""
+
+# Line 941
+msgid "%1$s / %2$s produktów (%3$.1f%%) — strona %4$s/%5$s"
+msgstr ""
+
+# Line 948
+msgid "Czas pracy:"
+msgstr ""
+
+# Line 950
+msgid "szacowany czas zakończenia:"
+msgstr ""
+
+# Line 957
+msgid "Synchronizacja jest automatycznie kontynuowana batch po batchu przez WP-Cron. Strona odświeża się sama; może być zamknięta."
+msgstr ""
+
+# Line 963
+msgid "Uwaga: brak postępu od ponad 2 minut — WP-Cron może nie być uruchomiony, więc synchronizacja mogła się nie rozpocząć/zatrzymać."
+msgstr ""
+
+# Line 967
+msgid "Kontynuuj teraz ręcznie (bez WP-Cron)"
+msgstr ""
+
+# Line 970
+msgid "Anulować synchronizację?"
+msgstr ""
+
+# Line 971
+msgid "Anuluj"
+msgstr ""
+
+# Line 978
+msgid "Odśwież postęp"
+msgstr ""
+
+# Line 1010
+msgid "Zakończono. Utworzono: %1$d, zaktualizowano: %2$d, pominięto: %3$d, błędy: %4$d. Szczegóły w logach WooCommerce."
+msgstr ""
+
+# Line 1042
+msgid "Cofnięto: %d produktów przeniesiono do kosza. Możesz je przywrócić w Produkty → Kosz."
+msgstr ""
+
+# Line 1047
+msgid "Scalanie uruchomione w tle. Odśwież stronę za chwilę — wynik pojawi się poniżej."
+msgstr ""
+
+# Line 1048
+msgid "Podgląd scalania uruchomiony w tle. Odśwież stronę za chwilę — plan pojawi się poniżej."
+msgstr ""
+
+# Line 1088
+msgid "Synchronizacja zakończona (%5$s). Utworzono: %1$d, zaktualizowano: %2$d, pominięto: %3$d, błędy: %4$d."
+msgstr ""
+
+# Line 1158
+msgid "Proste"
+msgstr ""
+
+# Line 1159
+msgid "Wariacyjne"
+msgstr ""
+
+# Line 1160
+msgid "Grupowane"
+msgstr ""
+
+# Line 1178
+msgid "Opis"
+msgstr ""
+
+# Line 1179
+msgid "Cena"
+msgstr ""
+
+# Line 1180
+msgid "Stan magazynowy"
+msgstr ""
+
+# Line 1181
+msgid "Obrazy"
+msgstr ""
+
+# Line 1182
+msgid "Kategorie"
+msgstr ""
+
+# Line 1183
+msgid "Atrybuty"
+msgstr ""
+
+# Line 1184
+msgid "Waga i wymiary"
+msgstr ""
+
+# Line 1230
+msgid "Następne uruchomienie: %s"
+msgstr ""
+
+# Line 1269
+msgid "Następne odświeżenie: %s"
+msgstr ""
+
+# Line 1306
+msgid "Co zrobić z produktami, których nie ma już w źródle. Dotyczy tylko produktów synchronizowanych przez ten plugin (znacznik %1$s). „Szkic\" oznacza je tagiem „%2$s\"; „Usuń trwale\" kasuje na stałe (z pominięciem kosza)."
+msgstr ""
+
+# Line 1346
+msgid "Zapisz ustawienia"
+msgstr ""
+
+# Line 1357
+msgid "Uruchomić synchronizację teraz?"
+msgstr ""
+
+# Line 1369
+msgid "Przenieść do kosza produkty utworzone w ostatniej synchronizacji?"
+msgstr ""
+
+# Line 1370
+msgid "Cofnij ostatnią synchronizację (%d)"
+msgstr ""
+
+# Line 1383
+msgid "Scalono: %d istniejących produktów oznaczono jako powiązane ze źródłem. Następna synchronizacja je zaktualizuje zamiast tworzyć duplikaty."
+msgstr ""
+
+# Line 1396
+msgid "Podgląd scalania: do scalenia %1$d, wieloznacznych (do ręcznego sprawdzenia) %2$d, już przypisanych %3$d."
+msgstr ""
+
+# Line 1400
+msgid "Scalić %d produktów? Nada im znacznik źródła (odwracalne przez ponowne czyszczenie meta)."
+msgstr ""
+
+# Line 1401
+msgid "Scal %d teraz"
+msgstr ""
+
+# Line 1417
+msgid "…i %d więcej."
+msgstr ""
+
+# Line 1434
+msgid "OSTATNIE OSTRZEŻENIE: total sync TWARDO usunie wszystkie produkty na celu, których nie ma na źródle. Tej operacji nie da się cofnąć bez kopii bazy. Kontynuować?"
+msgstr ""
+
+# Line 1451
+msgid "Logi: %s"
+msgstr ""
+
+# Line 1464
+msgid "Utworzono"
+msgstr ""
+
+# Line 1465
+msgid "Zaktualizowano"
+msgstr ""
+
+# Line 1466
+msgid "Pominięto"
+msgstr ""
+
+# Line 1467
+msgid "Oznaczono jako usunięte (draft)"
+msgstr ""
+
+# Line 1468
+msgid "Usunięto trwale (brak w źródle)"
+msgstr ""
+
+# Line 1469
+msgid "Ostrzeżenia"
+msgstr ""
+
+# Line 1470
+msgid "Błędy"
+msgstr ""
+
+# Line 1483
+msgid "Raport ostatniej synchronizacji"
+msgstr ""
+
+# Line 1484
+msgid "symulacja"
+msgstr ""
+
+# Line 1488
+msgid "Lista skrócona do %d pozycji na kategorię — liczniki powyżej są dokładne, pełne szczegóły w logach WooCommerce."
+msgstr ""
+
+# Line 1498
+msgid "Jak"
+msgstr ""
+
+# Line 1498
+msgid "Powód"
+msgstr ""
+
+# Line 1502
+msgid "Produkt"
+msgstr ""
+
+# Line 1503
+msgid "Typ"
+msgstr ""
+
+# Line 1518
+msgid "Brak uprawnień."
+msgstr ""
+

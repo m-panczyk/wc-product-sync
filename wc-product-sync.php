@@ -742,23 +742,53 @@ $defaults = array(
 		return ( 'hard' === ( $this->get_options()['deletion_mode'] ?? 'none' ) ) ? 'hard' : 'soft';
 	}
 
-	/** N1: HTTP source on a public host leaks the Basic-auth API keys in cleartext.
-	 *  Returns true when the URL is http:// AND the host is not local/private. */
+	/** Returns true when the URL scheme is not https:// AND the host is
+	 *  not a private/local address.  Used at settings-save time to surface
+	 *  a prominent admin warning (HTTP on public hosts = danger). */
 	private function source_url_is_insecure( $url ) {
 		$url = trim( (string) $url );
-		if ( '' === $url || 0 === stripos( $url, 'https://' ) ) {
+		if ( '' === $url ) {
+			return false;
+		}
+		$scheme = wp_parse_url( $url, PHP_URL_SCHEME );
+		// Only flag as insecure when not HTTPS — private hosts are
+		// allowed for local development / staging without TLS.
+		if ( 'https' === strtolower( (string) $scheme ) ) {
 			return false;
 		}
 		$host = wp_parse_url( $url, PHP_URL_HOST );
-		if ( ! $host ) {
-			return false;
-		}
-		if ( in_array( strtolower( $host ), array( 'localhost', '127.0.0.1', '::1' ), true )
-			|| preg_match( '/\.(local|test|localhost)$/i', $host )
-			|| preg_match( '/^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/', $host ) ) {
-			return false; // local/private lab host — http is acceptable
+		if ( ! empty( $host ) && $this->is_private_host( $host ) ) {
+			return false; // local dev / staging OK with HTTP.
 		}
 		return true;
+	}
+
+	/** True when the host is a private / loopback address (RFC 1918, IPv6
+	 *  loopback ::1, or "localhost" string). Also true for hosts that look
+	 *  like internal Docker/container service names (no dots = no public TLD). */
+	private function is_private_host( $host ) {
+		$host = strtolower( trim( (string) $host ) );
+		if ( 'localhost' === $host || '::1' === $host ) {
+			return true;
+		}
+		// Docker / container service names, short hostnames — no TLD dot present.
+		if ( false === strpos( $host, '.' ) ) {
+			return true;
+		}
+		// IPv4 private ranges: 10.x, 172.16-31.x, 192.168.x, 169.254.x (link-local), 127.x.x (loopback)
+		if ( preg_match( '/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/', $host, $m ) ) {
+			$a = (int) $m[1];
+			$b = (int) $m[2];
+			$c = (int) $m[3];
+			$d = (int) $m[4];
+			if ( 10 === $a ) return true;                            // 10.0.0.0/8
+			if ( 172 === $a && $b >= 16 && $b <= 31 ) return true;   // 172.16.0.0/12
+			if ( 192 === $a && 168 === $b ) return true;             // 192.168.0.0/16
+			if ( 169 === $a && 254 === $b ) return true;             // 169.254.0.0/16 link-local
+			if ( 127 === $a ) return true;                           // 127.0.0.0/8 loopback
+			if ( 0 === $a && 0 === $b && 0 === $c && 0 === $d ) return false; // not caught above, just in case
+		}
+		return false;
 	}
 
 	/* =====================================================================
@@ -772,11 +802,13 @@ $defaults = array(
 	public function sanitize_options( $input ) {
 		$out = $this->get_options();
 		if ( isset( $input['source_url'] ) ) {
-			$out['source_url']       = esc_url_raw( trim( $input['source_url'] ) );
-			if ( $this->source_url_is_insecure( $out['source_url'] ) ) {
+			$parsed = esc_url_raw( trim( $input['source_url'] ) );
+			if ( $this->source_url_is_insecure( $parsed ) ) {
 				add_settings_error( self::OPTION_KEY, 'wps_insecure_url',
-					__( 'Uwaga: URL źródła używa HTTP — klucze API są przesyłane jawnie. Użyj HTTPS.', 'wc-product-sync' ),
-					'warning' );
+					__( 'BŁĄD: URL źródła używa HTTP — klucze API są przesyłane jawnie. Synchronizacja nie zadziała bez HTTPS.', 'wc-product-sync' ),
+					'error' );
+			} else {
+				$out['source_url'] = $parsed;
 			}
 		}
 		if ( isset( $input['consumer_key'] ) ) {
@@ -938,11 +970,16 @@ $defaults = array(
 				echo '<div style="background:#e5e5e5; border-radius:4px; height:24px; margin-bottom:8px; overflow:hidden;">';
 				echo '<div style="background:#2271b1; height:100%; width:' . esc_attr( $percent ) . '%; transition:width 0.3s;"></div>';
 				echo '</div>';
-				printf( '<p><strong>%d</strong> / <strong>%d</strong> produktów (%.1f%%) — strona %d/%s</p>',
-					$processed, $total, $percent, $page, $total_pages > 0 ? (int) $total_pages : esc_html( '?' ) );
-				echo '<p>Czas pracy: <strong>' . esc_html( $this->format_duration( $elapsed ) ) . '</strong>';
-				if ( is_numeric( $eta_seconds ) ) {
-					echo ', szacowany czas zakończenia: <strong>' . esc_html( $this->format_duration( $eta_seconds ) ) . '</strong>';
+				$progress_text = __( '%1$s / %2$s produktów (%3$.1f%%) — strona %4$s/%5$s', 'wc-product-sync' );
+						echo '<p>' . sprintf( $progress_text,
+							'<strong>' . esc_html( number_format_i18n( $processed ) ) . '</strong>',
+							'<strong>' . esc_html( number_format_i18n( $total ) ) . '</strong>',
+							esc_html( $percent ),
+							'<strong>' . esc_html( $page ) . '</strong>',
+							$total_pages > 0 ? '<strong>' . esc_html( number_format_i18n( $total_pages ) ) . '</strong>' : '?' ) . '</p>';
+					echo '<p>' . esc_html__( 'Czas pracy:', 'wc-product-sync' ) . ' <strong>' . esc_html( $this->format_duration( $elapsed ) ) . '</strong>';
+					if ( is_numeric( $eta_seconds ) ) {
+						echo ', ' . esc_html__( 'szacowany czas zakończenia:', 'wc-product-sync' ) . ' <strong>' . esc_html( $this->format_duration( $eta_seconds ) ) . '</strong>';
 				}
 				echo '</p>';
 			}
@@ -962,8 +999,12 @@ $defaults = array(
 					esc_html__( 'Kontynuuj teraz ręcznie (bez WP-Cron)', 'wc-product-sync' ) );
 			}
 
-			printf( '<p><a href="%s" class="button button-link-danger" onclick="return confirm(\'Anulować synchronizację?\');">Anuluj</a>',
-				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_cancel' ), self::NONCE_ACTION . '_cancel' ) );
+			$confirm_text = esc_js( __( 'Anulować synchronizację?', 'wc-product-sync' ) );
+			$cancel_label = __( 'Anuluj', 'wc-product-sync' );
+			printf( '<p><a href="%s" class="button button-link-danger" onclick="return confirm(\'%s\');">%s</a>',
+				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_cancel' ), self::NONCE_ACTION . '_cancel' ),
+				$confirm_text,
+				esc_html( $cancel_label ) );
 			printf( ' <a href="%s" class="button">%s</a>',
 				esc_url( admin_url( 'admin.php?page=wc-product-sync' ) ),
 				esc_html__( 'Odśwież postęp', 'wc-product-sync' ) );
@@ -1737,6 +1778,19 @@ $defaults = array(
 
 	private function api_get( $path, array $query = array() ) {
 		$url  = add_query_arg( $query, $this->cfg_source_url() . $path );
+
+		// Hard-block non-HTTPS requests to public hosts — Basic auth keys travel in cleartext.
+		// Local/private hosts are exempt (already checked inside source_url_is_insecure).
+		if ( $this->source_url_is_insecure( $this->cfg_source_url() ) ) {
+			return new WP_Error( 'wps_insecure_url',
+				sprintf(
+					/* translators: %s: the configured source URL */
+					__( 'Cannot connect to insecure source URL (%s). HTTP sends API keys in cleartext. Configure an HTTPS URL.', 'wc-product-sync' ),
+					esc_html( $this->cfg_source_url() )
+				)
+			);
+		}
+
 		$auth = 'Basic ' . base64_encode( $this->cfg_ck() . ':' . $this->cfg_cs() );
 		$max  = 5;
 
