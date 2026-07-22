@@ -938,11 +938,16 @@ $defaults = array(
 				echo '<div style="background:#e5e5e5; border-radius:4px; height:24px; margin-bottom:8px; overflow:hidden;">';
 				echo '<div style="background:#2271b1; height:100%; width:' . esc_attr( $percent ) . '%; transition:width 0.3s;"></div>';
 				echo '</div>';
-				printf( '<p><strong>%d</strong> / <strong>%d</strong> produktów (%.1f%%) — strona %d/%s</p>',
-					$processed, $total, $percent, $page, $total_pages > 0 ? (int) $total_pages : esc_html( '?' ) );
-				echo '<p>Czas pracy: <strong>' . esc_html( $this->format_duration( $elapsed ) ) . '</strong>';
-				if ( is_numeric( $eta_seconds ) ) {
-					echo ', szacowany czas zakończenia: <strong>' . esc_html( $this->format_duration( $eta_seconds ) ) . '</strong>';
+				$progress_text = __( '%1$s / %2$s produktów (%3$.1f%%) — strona %4$s/%5$s', 'wc-product-sync' );
+						echo '<p>' . sprintf( $progress_text,
+							'<strong>' . esc_html( number_format_i18n( $processed ) ) . '</strong>',
+							'<strong>' . esc_html( number_format_i18n( $total ) ) . '</strong>',
+							esc_html( $percent ),
+							'<strong>' . esc_html( $page ) . '</strong>',
+							$total_pages > 0 ? '<strong>' . esc_html( number_format_i18n( $total_pages ) ) . '</strong>' : '?' ) . '</p>';
+					echo '<p>' . esc_html__( 'Czas pracy:', 'wc-product-sync' ) . ' <strong>' . esc_html( $this->format_duration( $elapsed ) ) . '</strong>';
+					if ( is_numeric( $eta_seconds ) ) {
+						echo ', ' . esc_html__( 'szacowany czas zakończenia:', 'wc-product-sync' ) . ' <strong>' . esc_html( $this->format_duration( $eta_seconds ) ) . '</strong>';
 				}
 				echo '</p>';
 			}
@@ -962,8 +967,12 @@ $defaults = array(
 					esc_html__( 'Kontynuuj teraz ręcznie (bez WP-Cron)', 'wc-product-sync' ) );
 			}
 
-			printf( '<p><a href="%s" class="button button-link-danger" onclick="return confirm(\'Anulować synchronizację?\');">Anuluj</a>',
-				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_cancel' ), self::NONCE_ACTION . '_cancel' ) );
+			$confirm_text = esc_js( __( 'Anulować synchronizację?', 'wc-product-sync' ) );
+			$cancel_label = __( 'Anuluj', 'wc-product-sync' );
+			printf( '<p><a href="%s" class="button button-link-danger" onclick="return confirm(\'%s\');">%s</a>',
+				wp_nonce_url( admin_url( 'admin-post.php?action=wc_product_sync_cancel' ), self::NONCE_ACTION . '_cancel' ),
+				$confirm_text,
+				esc_html( $cancel_label ) );
 			printf( ' <a href="%s" class="button">%s</a>',
 				esc_url( admin_url( 'admin.php?page=wc-product-sync' ) ),
 				esc_html__( 'Odśwież postęp', 'wc-product-sync' ) );
