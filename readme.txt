@@ -4,7 +4,7 @@ Tags: woocommerce, product-sync, sku, batch-import
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.9.27
+Stable tag: 0.9.27-rc6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -93,10 +93,6 @@ Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp t
 
 == Changelog ==
 
-= 0.9.27-rc6 =
-
-* Tryb promocji (`price_promotion_mode`) — możliwość kontroli, jak cena promocyjna ze źródła jest odzwierciedlana na celu (kopiuj bez zmian / cena promocyjna → podstawowa / cena przed promocją → podstawowa)
-
 = 0.9.27 =
 
 * Modyfikator ceny przy synchronizacji — procent i/lub kwota stała względem źródła, z wyborem zaokrąglenia
@@ -111,6 +107,10 @@ Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp t
 * Cofanie ostatniej synchronizacji (`undo_run`) — przenosi do kosza produkty utworzone w ostatnim przebiegu
 * Endpoint atrybutów przestał być wymagany — mapa atrybutów odtwarzana z payloadów produktów
 * Nieodzwzorowana wariacja to błąd, nie ciche pominięcie
+
+= 0.9.27-rc6 =
+
+* Tryb promocji (`price_promotion_mode`) — możliwość kontroli, jak cena promocyjna ze źródła jest odzwierciedlana na celu (kopiuj bez zmian / cena promocyjna → podstawowa / cena przed promocją → podstawowa)
 
 = 0.9.26 =
 
@@ -187,11 +187,11 @@ Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp t
 
 == Upgrade Notice ==
 
-= 0.9.27-rc6 =
-Nowy tryb promocji cen (price_promotion_mode) — kompatybilne wstecz, domyślne zachowanie niezmienione.
-
 = 0.9.27 =
 Krytyczne naprawie: dopasowanie po nazwie, bezpieczny zapis wariacji, batchowanie dry-run/scalania, total sync i cofanie syncu. Zalecana aktualizacja.
+
+= 0.9.27-rc6 =
+Nowy tryb promocji cen (price_promotion_mode) — kompatybilne wstecz, domyślne zachowanie niezmienione.
 
 = 0.9.24 =
 [krytyczne] Błędy pobierania źródła były raportowane jako sukces — zalecana pilna aktualizacja.
