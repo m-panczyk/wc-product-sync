@@ -742,23 +742,23 @@ $defaults = array(
 		return ( 'hard' === ( $this->get_options()['deletion_mode'] ?? 'none' ) ) ? 'hard' : 'soft';
 	}
 
-	/** N1: HTTP source on a public host leaks the Basic-auth API keys in cleartext.
-	 *  Returns true when the URL is http:// AND the host is not local/private. */
+	/** Returns true when the URL scheme is not https://.
+	 *  Used at settings-save time to surface a prominent admin warning. */
 	private function source_url_is_insecure( $url ) {
 		$url = trim( (string) $url );
-		if ( '' === $url || 0 === stripos( $url, 'https://' ) ) {
+		if ( '' === $url ) {
 			return false;
 		}
-		$host = wp_parse_url( $url, PHP_URL_HOST );
-		if ( ! $host ) {
-			return false;
-		}
-		if ( in_array( strtolower( $host ), array( 'localhost', '127.0.0.1', '::1' ), true )
-			|| preg_match( '/\.(local|test|localhost)$/i', $host )
-			|| preg_match( '/^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/', $host ) ) {
-			return false; // local/private lab host — http is acceptable
-		}
-		return true;
+		$scheme = wp_parse_url( $url, PHP_URL_SCHEME );
+		return 'https' !== strtolower( (string) $scheme );
+	}
+
+	/** Returns true when the URL scheme is not https://.
+	 *  Used at request time by api_get() to hard-block — no exceptions for
+	 *  local/private hosts: even LAN traffic can be sniffed and the same
+	 *  code path fires in cron, so the operator must use TLS everywhere. */
+	private function source_url_requires_https( $url ) {
+		return $this->source_url_is_insecure( $url );
 	}
 
 	/* =====================================================================
@@ -775,8 +775,8 @@ $defaults = array(
 			$out['source_url']       = esc_url_raw( trim( $input['source_url'] ) );
 			if ( $this->source_url_is_insecure( $out['source_url'] ) ) {
 				add_settings_error( self::OPTION_KEY, 'wps_insecure_url',
-					__( 'Uwaga: URL źródła używa HTTP — klucze API są przesyłane jawnie. Użyj HTTPS.', 'wc-product-sync' ),
-					'warning' );
+					__( 'BŁĄD: URL źródła używa HTTP — klucze API są przesyłane jawnie. Synchronizacja nie zadziała bez HTTPS.', 'wc-product-sync' ),
+					'error' );
 			}
 		}
 		if ( isset( $input['consumer_key'] ) ) {
@@ -1737,6 +1737,18 @@ $defaults = array(
 
 	private function api_get( $path, array $query = array() ) {
 		$url  = add_query_arg( $query, $this->cfg_source_url() . $path );
+
+		// Hard-block non-HTTPS requests — Basic auth keys travel in cleartext.
+		if ( $this->source_url_requires_https( $this->cfg_source_url() ) ) {
+			return new WP_Error( 'wps_insecure_url',
+				sprintf(
+					/* translators: %s: the configured source URL */
+					__( 'Cannot connect to insecure source URL (%s). HTTP sends API keys in cleartext. Configure an HTTPS URL.', 'wc-product-sync' ),
+					esc_html( $this->cfg_source_url() )
+				)
+			);
+		}
+
 		$auth = 'Basic ' . base64_encode( $this->cfg_ck() . ':' . $this->cfg_cs() );
 		$max  = 5;
 
