@@ -774,6 +774,8 @@ $defaults = array(
 		if ( preg_match( '/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/', $host, $m ) ) {
 			$a = (int) $m[1];
 			$b = (int) $m[2];
+			$c = (int) $m[3];
+			$d = (int) $m[4];
 			if ( 10 === $a ) return true;                          // 10.0.0.0/8
 			if ( 172 === $a && $b >= 16 && $b <= 31 ) return true; // 172.16.0.0/12
 			if ( 192 === $a && 168 === $b ) return true;           // 192.168.0.0/16
@@ -793,11 +795,13 @@ $defaults = array(
 	public function sanitize_options( $input ) {
 		$out = $this->get_options();
 		if ( isset( $input['source_url'] ) ) {
-			$out['source_url']       = esc_url_raw( trim( $input['source_url'] ) );
-			if ( $this->source_url_is_insecure( $out['source_url'] ) ) {
+			$parsed = esc_url_raw( trim( $input['source_url'] ) );
+			if ( $this->source_url_is_insecure( $parsed ) ) {
 				add_settings_error( self::OPTION_KEY, 'wps_insecure_url',
 					__( 'BŁĄD: URL źródła używa HTTP — klucze API są przesyłane jawnie. Synchronizacja nie zadziała bez HTTPS.', 'wc-product-sync' ),
 					'error' );
+			} else {
+				$out['source_url'] = $parsed;
 			}
 		}
 		if ( isset( $input['consumer_key'] ) ) {
