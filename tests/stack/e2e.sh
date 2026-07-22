@@ -931,5 +931,41 @@ echo "    reset to defaults → regular=$NOOP (exp 100)"
 [ "$NOOP" = "100" ] || { echo "  FAIL: default (0%,0) must copy the source price unchanged (got $NOOP, expected 100)" >&2; exit 1; }
 echo "  PASS: % + fixed (115/93), charm rounding (110.99), default no-op (100), idempotent from source"
 
+# --- Phase 14: promotion mode — keep / promo_to_base / base_after_promo (issue #18) ----------
+#
+# Source PMOD-1 is on sale (regular=100, sale=80). price_promotion_mode decides how that maps onto
+# the target. Assert with the price modifier neutral (0% + 0, standard) so the numbers are the raw
+# source prices. The modifier is applied AFTER the promo pick, tested in Phase 13.
+echo "==> Phase 14: promotion mode (keep / promo_to_base / base_after_promo) (issue #18)"
+opt price_markup_pct 0; opt price_markup_fixed 0; opt price_rounding standard
+
+# promo_to_base: sale price becomes the base, sale cleared.
+opt price_promotion_mode promo_to_base
+drive >/dev/null
+P2B_REG="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_regular_price():"gone";')"
+P2B_SALE="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_sale_price():"gone";')"
+echo "    promo_to_base → regular=$P2B_REG (exp 80)  sale='$P2B_SALE' (exp empty)"
+[ "$P2B_REG" = "80" ] || { echo "  FAIL: promo_to_base must set regular=sale (got $P2B_REG, expected 80)" >&2; exit 1; }
+[ -z "$P2B_SALE" ]    || { echo "  FAIL: promo_to_base must clear the sale price (got '$P2B_SALE')" >&2; exit 1; }
+
+# base_after_promo: regular stays, sale cleared (ignore the source promotion).
+opt price_promotion_mode base_after_promo
+drive >/dev/null
+BAP_REG="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_regular_price():"gone";')"
+BAP_SALE="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_sale_price():"gone";')"
+echo "    base_after_promo → regular=$BAP_REG (exp 100)  sale='$BAP_SALE' (exp empty)"
+[ "$BAP_REG" = "100" ] || { echo "  FAIL: base_after_promo must keep regular (got $BAP_REG, expected 100)" >&2; exit 1; }
+[ -z "$BAP_SALE" ]     || { echo "  FAIL: base_after_promo must clear the sale price (got '$BAP_SALE')" >&2; exit 1; }
+
+# keep (default): copy the promotion as-is — regular + sale both mirror the source.
+opt price_promotion_mode keep
+drive >/dev/null
+KEEP_REG="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_regular_price():"gone";')"
+KEEP_SALE="$(twp eval '$p=wc_get_product(wc_get_product_id_by_sku("PMOD-1")); echo $p?$p->get_sale_price():"gone";')"
+echo "    keep → regular=$KEEP_REG (exp 100)  sale=$KEEP_SALE (exp 80)"
+[ "$KEEP_REG" = "100" ] || { echo "  FAIL: keep must mirror source regular (got $KEEP_REG, expected 100)" >&2; exit 1; }
+[ "$KEEP_SALE" = "80" ] || { echo "  FAIL: keep must mirror source sale (got $KEEP_SALE, expected 80)" >&2; exit 1; }
+echo "  PASS: promo_to_base (80/—), base_after_promo (100/—), keep restores the sale (100/80)"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo)"
