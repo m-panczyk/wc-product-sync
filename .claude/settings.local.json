@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(php -l wc-product-sync.php)",
+      "Bash(git rm *)"
+    ]
+  }
+}
