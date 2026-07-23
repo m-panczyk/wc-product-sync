@@ -2492,11 +2492,14 @@ $defaults = array(
 		}
 
 		// 3) Fallback: szukaj po nazwie.
-		//    Tylko jeśli znaleziony produkt jest nieprzypisany (brak _wps_source_id)
-		//    lub przypisany do tego samego źródła — w przeciwnym razie to inny
-		//    produkt o tej samej nazwie, nie nasz.
-		$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
-		if ( '' !== $name && ! empty( $p['id'] ) ) {
+			//    Tylko jeśli znaleziony produkt jest nieprzypisany (brak _wps_source_id)
+			//    lub przypisany do tego samego źródła — w przeciwnym razie to inny
+			//    produkt o tej samej nazwie, nie nasz.
+			//    W trybie total sync pomijamy dopasowanie po nazwie, aby zewnętrzne/manualnie
+			//    dodane produkty (bez _wps_source_id) nie zostały „pochłonięte" przez aktualizację
+			//    i przetrwały do siłowego usunięcia przez force-full / soft-delete (#32).
+			$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
+			if ( '' !== $name && ! empty( $p['id'] ) && ! $this->total_sync ) {
 			$src_id  = absint( $p['id'] );
 			// 'title' (exact match), NOT 'post_title' — WP_Query has no 'post_title' arg, so it was
 			// silently IGNORED: the query returned products regardless of name. With one candidate
