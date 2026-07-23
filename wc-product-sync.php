@@ -2373,10 +2373,12 @@ $defaults = array(
 			if ( $this->last_image_failed ) {
 				$stats['errors']++;
 				$this->report_add( 'errors', $base + array( 'reason' => 'nie pobrano obrazów (produkt zachowany, obrazy bez zmian)' ) );
+				$this->log( 'warning', sprintf( 'Obraz błędny: %s (SKU=%s)', $base['name'], $base['sku'] ) );
 			}
 			if ( $this->last_variation_failed ) {
 				$stats['errors']++;
 				$this->report_add( 'errors', $base + array( 'reason' => 'część wariacji nie została zsynchronizowana (szczegóły w logu)' ) );
+				$this->log( 'warning', sprintf( 'Wariacje błędne: %s (SKU=%s)', $base['name'], $base['sku'] ) );
 			}
 			if ( 'created' === $result ) {
 				// Tag the product with the run that created it, so "undo last sync" can trash
@@ -2386,10 +2388,14 @@ $defaults = array(
 					update_post_meta( $this->last_saved_id, self::META_CREATED_RUN, $this->run_started_at ?: time() );
 				}
 				$this->report_add( 'created', $base + array( 'how' => 'nowy produkt' ) );
+				$this->log( 'info', sprintf( 'Utworzono nowy produkt: %s (SKU=%s)', $base['name'], $base['sku'] ) );
 			} elseif ( 'updated' === $result ) {
 				$this->report_add( 'updated', $base + array( 'how' => $this->last_match_method ? 'dopasowano po ' . $this->last_match_method : 'zaktualizowano' ) );
+				$match = $this->last_match_method ? sprintf( ', dopasowano po %s', strtolower($this->last_match_method) ) : '';
+				$this->log( 'info', sprintf( 'Zaktualizowano produkt: %s (SKU=%s)%s', $base['name'], $base['sku'], $match ) );
 			} elseif ( 'skipped' === $result ) {
 				$this->report_add( 'skipped', $base + array( 'reason' => $this->last_skip_reason ?: 'pominięto' ) );
+				$this->log( 'info', sprintf( 'Pominięto produkt: %s (SKU=%s): %s', $base['name'], $base['sku'], $this->last_skip_reason ?: 'pominięto' ) );
 			}
 		} catch ( \Throwable $e ) {
 			$stats['errors']++;
