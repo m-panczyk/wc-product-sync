@@ -581,7 +581,6 @@ $defaults = array(
 		'price_markup_fixed'  => 0,          // fixed amount added after the percentage, may be negative
 		'price_rounding'      => 'standard', // standard (2 dp) | integer | charm (.99) | none
 		'price_promotion_mode' => 'keep', // keep / promo_to_base / base_after_promo
-		'price_promotion_mode' => 'keep', // keep / promo_to_base / base_after_promo
 		// Update channel: 'stable' (latest) or 'rc' (latest-beta). Overridden by the
 		// WC_PRODUCT_SYNC_UPDATE_URL constant when it is defined.
 		'update_channel'      => 'stable',
@@ -765,11 +764,16 @@ $defaults = array(
 		return true;
 	}
 
-	/** True when the host is a private / loopback address (RFC 1918, IPv6
-	 *  loopback ::1, or "localhost" string). */
+	/** True when the host is a private / loopback address or a bare local-name
+	 *  (no dot, no TLD — Docker service names like "src-wp", Vagrant, WSL, etc.). */
 	private function is_private_host( $host ) {
 		$host = strtolower( trim( (string) $host ) );
 		if ( 'localhost' === $host || '::1' === $host ) {
+			return true;
+		}
+		// Bare hostname with no dot can only resolve within a bounded local namespace —
+		// Docker service names ("src-wp"), Vagrant, WSL hostnames, etc. Treat as private.
+		if ( false === strpos( $host, '.' ) ) {
 			return true;
 		}
 		// IPv4 private ranges: 10.x, 172.16-31.x, 192.168.x
@@ -800,8 +804,8 @@ $defaults = array(
 			$out['source_url']       = esc_url_raw( trim( $input['source_url'] ) );
 			if ( $this->source_url_is_insecure( $out['source_url'] ) ) {
 				add_settings_error( self::OPTION_KEY, 'wps_insecure_url',
-					__( 'BŁĄD: URL źródła używa HTTP — klucze API są przesyłane jawnie. Synchronizacja nie zadziała bez HTTPS.', 'wc-product-sync' ),
-					'error' );
+						__( 'Uwaga: URL źródła używa HTTP — klucze API są przesyłane jawnie. Użyj HTTPS.', 'wc-product-sync' ),
+						'warning' );
 			}
 		}
 		if ( isset( $input['consumer_key'] ) ) {
