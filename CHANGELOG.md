@@ -1,6 +1,6 @@
 ## Zmiany (Changelog)
 
-### 0.9.27-rc6 — kontrola propagacji cen promocyjnych ze źródła (#18)
+### 0.9.27-rc7 — modyfikator ceny, total sync, kanał aktualizacji, naprawa dopasowania po nazwie; [krytyczne] skip name-fallback w total sync (#32); fix bezpieczeństwa HTTP leak (#24)
 
 - **Tryb promocji** (`price_promotion_mode`) w sekcji „Modyfikator ceny" panelu wtyczki.
   Gdy źródło wystawia produkt na promocję (`regular_price: 100`, `sale_price: 80`) można wybrać,
@@ -17,7 +17,6 @@
   CREATE prostego, UPDATE wariacji). Tryb `keep` jest domyślny — **kompatybilne wstecz**, istniejące
   instalacje nie widzą zmian.
 
-### 0.9.27 (current) — obejście `/products/attributes`, scalanie i cofanie synchronizacji, total sync, [krytyczne] naprawa dopasowania po nazwie
 
 - **Modyfikator ceny przy synchronizacji (#14).** Nowe ustawienie „Modyfikator ceny": **procent** i/lub
   **kwota stała** względem źródła, z wyborem **zaokrąglenia** (standardowo 2 miejsca / do pełnych /

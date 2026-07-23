@@ -4,7 +4,7 @@ Tags: woocommerce, product-sync, sku, batch-import
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.9.27-rc6
+Stable tag: 0.9.27-rc7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -108,7 +108,7 @@ Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp t
 * Endpoint atrybutów przestał być wymagany — mapa atrybutów odtwarzana z payloadów produktów
 * Nieodzwzorowana wariacja to błąd, nie ciche pominięcie
 
-= 0.9.27-rc6 =
+= 0.9.27-rc7 =
 
 * Tryb promocji (`price_promotion_mode`) — możliwość kontroli, jak cena promocyjna ze źródła jest odzwierciedlana na celu (kopiuj bez zmian / cena promocyjna → podstawowa / cena przed promocją → podstawowa)
 
@@ -190,7 +190,7 @@ Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp t
 = 0.9.27 =
 Krytyczne naprawie: dopasowanie po nazwie, bezpieczny zapis wariacji, batchowanie dry-run/scalania, total sync i cofanie syncu. Zalecana aktualizacja.
 
-= 0.9.27-rc6 =
+= 0.9.27-rc7 =
 Nowy tryb promocji cen (price_promotion_mode) — kompatybilne wstecz, domyślne zachowanie niezmienione.
 
 = 0.9.24 =
