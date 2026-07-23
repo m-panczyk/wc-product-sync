@@ -804,8 +804,8 @@ $defaults = array(
 			$out['source_url']       = esc_url_raw( trim( $input['source_url'] ) );
 			if ( $this->source_url_is_insecure( $out['source_url'] ) ) {
 				add_settings_error( self::OPTION_KEY, 'wps_insecure_url',
-						__( 'BŁĄD: URL źródła używa HTTP — klucze API są przesyłane jawnie. Użyj HTTPS.', 'wc-product-sync' ),
-								'error' );
+						__( 'Uwaga: URL źródła używa HTTP — klucze API są przesyłane jawnie. Użyj HTTPS.', 'wc-product-sync' ),
+									'warning' );
 			}
 		}
 		if ( isset( $input['consumer_key'] ) ) {
