@@ -4,7 +4,7 @@ Tags: woocommerce, product-sync, sku, batch-import
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.9.27-rc6
+Stable tag: 0.9.27-rc7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -92,6 +92,17 @@ define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxx' ); // prywatne repozytorium
 Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp transient delete wps_update_info`.
 
 == Changelog ==
+
+= 0.9.27-rc7 =
+
+* [krytyczne] Ochrona przed kolizją SKU wariacji — gdy SKU wariacji ze źródła zajmuje na celu inny produkt, SKU jest jednoznacznie sufiksowane; przy ponownej synchronizacji zachowywane bez cofania do kolidującej wartości (idempotentne) (#36)
+* [krytyczne] Total sync pomija dopasowanie po nazwie — obce produkty o zbieżnej nazwie nie „przeżywają" już kasowania przy lustrzeniu źródła (#32)
+* Dopasowanie po nazwie obejmuje statusy draft/private, nie tylko publish — brak duplikatów przy synchronizacji nieopublikowanych produktów (#25)
+* Bardziej szczegółowe logi WooCommerce dla pojedynczych akcji na produktach (utworzenie/aktualizacja/pominięcie) (#34)
+* Internacjonalizacja — wszystkie napisy UI opakowane w funkcje tłumaczeń, dołączony katalog `.pot` (#23)
+* readme.txt w stylu WordPress.org (metadane wtyczki) (#26)
+* CI: krok PHPCS-WP w pipeline (#22)
+* Testy e2e pokrywają tryb promocji cen (keep / promo_to_base / base_after_promo) (#18/#21)
 
 = 0.9.27 =
 
