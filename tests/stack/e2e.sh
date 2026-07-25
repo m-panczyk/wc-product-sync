@@ -967,5 +967,118 @@ echo "    keep → regular=$KEEP_REG (exp 100)  sale=$KEEP_SALE (exp 80)"
 [ "$KEEP_SALE" = "80" ] || { echo "  FAIL: keep must mirror source sale (got $KEEP_SALE, expected 80)" >&2; exit 1; }
 echo "  PASS: promo_to_base (80/—), base_after_promo (100/—), keep restores the sale (100/80)"
 
+# --- Phase 15: SKU collision guard deduplicates conflicting variation SKUs (issue #36) ------
+#
+# When a source variation's SKU is already occupied globally on the target by a DIFFERENT product's
+# variation, WooCommerce's save() rejects it with "Invalid or duplicated SKU". Before the fix, this
+# silently failed every variation → empty parent. The collision guard detects the conflict and
+# appends the target parent ID as a suffix (e.g. "COLLIDE-1-<pid>"), so save() succeeds.
+#
+# This phase sets up exactly that scenario: source has a variable product with SKU COLLIDE-1, and
+# the target already has a simple product owning that SKU globally. After sync, the variation must
+# exist on the target with a deduplicated SKU, and the parent must NOT be empty.
+echo "==> Phase 15: SKU collision guard deduplicates conflicting variation SKUs (issue #36)"
+
+# Source: variable "Kolizja" with 2 variations, one carrying the colliding SKU.
+swp eval '
+foreach ( get_posts(array("post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids")) as $id ){ wp_delete_post($id,true); }
+$p=new WC_Product_Variable(); $p->set_name("Kolizja"); $p->set_sku("SRC-KOLIZJA"); $p->set_status("publish");
+$a=new WC_Product_Attribute(); $a->set_name("Rozmiar"); $a->set_options(array("S","M")); $a->set_visible(true); $a->set_variation(true);
+$p->set_attributes(array($a)); $pid=$p->save();
+$v1=new WC_Product_Variation(); $v1->set_parent_id($pid); $v1->set_attributes(array("rozmiar"=>"s")); $v1->set_sku("COLLIDE-1"); $v1->set_regular_price("160"); $v1->set_status("publish"); $v1->save();
+$v2=new WC_Product_Variation(); $v2->set_parent_id($pid); $v2->set_attributes(array("rozmiar"=>"m")); $v2->set_sku("KOLIZJA-M"); $v2->set_regular_price("160"); $v2->set_status("publish"); $v2->save();
+' >/dev/null
+
+# Target: a simple product already owns SKU COLLIDE-1 globally (the collision).
+twp eval '
+foreach ( get_posts(array("post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids")) as $id ){ wp_delete_post($id,true); }
+$s=new WC_Product_Simple(); $s->set_name("Inny"); $s->set_sku("COLLIDE-1"); $s->set_regular_price("5"); $s->set_status("publish"); $s->save();
+foreach ( glob( WP_CONTENT_DIR."/uploads/wc-logs/wc-product-sync*.log" ) as $f ){ unlink($f); }
+' >/dev/null
+
+opt per_page 10; opt sync_batch_limit 100; opt max_batch_seconds 0; opt force_full_sync 0; opt deletion_mode none
+opt price_markup_pct 0; opt price_markup_fixed 0; opt price_rounding standard; opt price_promotion_mode keep
+drive >/dev/null
+
+# The variable product "Kolizja" must exist on the target with 2 variations (not empty).
+KOL_ID="$(twp eval '$ids=get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Kolizja")); echo $ids?$ids[0]:0;')"
+KOL_KIDS="$(twp eval '$p=wc_get_product('"$KOL_ID"'); echo $p?count($p->get_children()):-1;')"
+echo "    Kolizja #$KOL_ID children=$KOL_KIDS (must be 2, not empty)"
+[ "$KOL_KIDS" -eq 2 ] || { echo "  FAIL: collision guard did not save all variations (children=$KOL_KIDS, expected 2)" >&2; exit 1; }
+
+# The colliding variation must have a deduplicated SKU (original + "-" + parent_id).
+DEDUP_SKU="$(twp eval '
+$p=wc_get_product('"$KOL_ID"');
+foreach ( $p->get_children() as $vid ) {
+	$v=wc_get_product($vid);
+	if ( $v && strpos($v->get_sku(), "COLLIDE-1") === 0 && $v->get_sku() !== "COLLIDE-1" ) { echo $v->get_sku(); exit; }
+}
+echo "not_found";
+')"
+echo "    deduplicated SKU: $DEDUP_SKU (expected COLLIDE-1-<parent_id>)"
+case "$DEDUP_SKU" in
+	COLLIDE-1-*) echo "    SKU suffix matches parent_id pattern" ;;
+	*) echo "  FAIL: deduplicated SKU does not match expected pattern (got $DEDUP_SKU)" >&2; exit 1 ;;
+esac
+
+# The non-colliding variation must keep its original SKU.
+OK_SKU="$(twp eval '
+$p=wc_get_product('"$KOL_ID"');
+foreach ( $p->get_children() as $vid ) {
+	$v=wc_get_product($vid);
+	if ( $v && $v->get_sku() === "KOLIZJA-M" ) { echo "found"; exit; }
+}
+echo "not_found";
+')"
+echo "    non-colliding variation KOLIZJA-M: $OK_SKU"
+[ "$OK_SKU" = "found" ] || { echo "  FAIL: non-colliding variation SKU was changed (expected KOLIZJA-M unchanged)" >&2; exit 1; }
+
+# The original COLLIDE-1 simple product must still exist (guard modifies the new variation, not the existing product).
+SIMPLE_OK="$(twp eval '$id=wc_get_product_id_by_sku("COLLIDE-1"); echo $id?"yes":"no";')"
+echo "    original COLLIDE-1 simple product: $SIMPLE_OK"
+[ "$SIMPLE_OK" = "yes" ] || { echo "  FAIL: the original product owning COLLIDE-1 was deleted" >&2; exit 1; }
+
+echo "  PASS: SKU collision guard saved all variations (2), deduplicated SKU ($DEDUP_SKU), non-colliding unchanged, original preserved"
+
+# --- Phase 16: re-sync update path — the deduped SKU must survive a second sync pass ----------
+#
+# The owner identified that before this fix, after the first create pass the variation gets
+# "COLLIDE-1-{pid}", but on re-sync the variation matches by attribute signature (not exact
+# SKU), enters the UPDATE path where the old dedup gate (`!$is_update`) skipped guard logic.
+# set_sku("COLLIDE-1") was called on a variation that already held "COLLIDE-1-{pid}" — WC
+# rejected with "Invalid or duplicated SKU" and the variation was rolled back, re-surfacing
+# the original issue #36 symptom (errors every run).
+#
+# After the fix, the update path checks $current_sku against dedup_parents; if it's already
+# the deduped form it stays there → idempotent on re-sync.
+echo "==> Phase 16: SKU collision guard survives a second sync pass (update-path idempotency) (issue #36)"
+
+# Run another sync — this exercises the UPDATE path for existing target products/variants.
+drive >/dev/null
+
+KOL_KIDS2="$(twp eval '$ids=get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Kolizja")); $p=wc_get_product($ids?$ids[0]:0); echo $p?count($p->get_children()):-1;')"
+echo "    Kolizja children after re-sync: $KOL_KIDS2 (must be 2, not empty)"
+
+DEDUP_SKU2="$(twp eval '$ids=get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Kolizja")); $p=wc_get_product($ids?$ids[0]:0); foreach( $p->get_children() as $vid ) { $v=wc_get_product($vid); if ( $v && strpos($v->get_sku(),"COLLIDE-1")===0 && $v->get_sku()!=="COLLIDE-1" ) { echo $v->get_sku(); exit; } } echo "not_found";')"
+echo "    deduplicated SKU after re-sync: $DEDUP_SKU2 (must still be COLLIDE-1-* pattern)"
+
+case "$DEDUP_SKU2" in
+	COLLIDE-1-*) ;;
+	*) echo "  FAIL: re-sync corrupted the deduped SKU (got '$DEDUP_SKU2') — update path is not idempotent" >&2; exit 1 ;;
+esac
+
+[ "$KOL_KIDS2" -eq 2 ] || { echo "  FAIL: re-sync left empty parent again (children=$KOL_KIDS2)" >&2; exit 1; }
+
+echo "    non-colliding variation KOLIZJA-M still present after re-sync"
+OK_SKU2="$(twp eval '$ids=get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Kolizja")); $p=wc_get_product($ids?$ids[0]:0); foreach( $p->get_children() as $vid ) { $v=wc_get_product($vid); if ( $v && $v->get_sku()==="KOLIZJA-M" ) { echo "found"; exit; } } echo "not_found";')"
+[ "$OK_SKU2" = "found" ] || { echo "  FAIL: non-colliding variation lost on re-sync" >&2; exit 1; }
+
+# Check that no errors were logged during the re-sync run.
+ERRS="$(twp eval '$r=get_option("wps_last_sync_result"); echo (int)($r["errors"]??0);')"
+echo "    re-sync reported błędy=$ERRS (must be 0)"
+[ "$ERRS" -eq 0 ] || { echo "  FAIL: re-sync still reports errors — issue #36 not fixed" >&2; exit 1; }
+
+echo "  PASS: SKU collision guard is idempotent on update path (children=2, deduped SKU preserved, błędy=0)"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync)"

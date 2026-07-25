@@ -19,4 +19,4 @@ tests/stack/.env
 
 # Development tool state
 .claude/
-.hermes/agent-state.json
+.hermes/
