@@ -1,10 +1,18 @@
 name: Release
 
-# Tag v<version> -> build the ZIP, attach it to that tag's release, and swap update.json
-# on the moving `latest` release (the URL every store's updater polls).
+# Tag v<version> -> validate the tag, RUN THE TESTS on the tagged tree, then build the
+# ZIP, attach it to that tag's release, and swap update.json on the moving channel
+# release (the URL every store's updater polls).
 #
-# publish.sh refuses to run when the tag and the plugin header disagree, so a mistyped
-# bump fails here rather than shipping metadata that points at the wrong package.
+# Pipeline (each job gates the next):
+#   guard  — tag format + header match + no-duplicate + monotonic ordering. Fast, fails early.
+#   lint   — php -l, shell syntax, real package build, on the TAGGED tree.
+#   e2e    — hermetic two-store sync + parity, on the TAGGED tree.
+#   release— publish.sh (build ZIP, attach, swap channel). Only runs if lint AND e2e pass.
+#
+# Version -> channel is derived by publish.sh, never passed by hand:
+#   0.9.27-rc4  -> prerelease, latest-beta only        (prod stores never see it)
+#   0.9.27      -> stable,     latest + latest-beta     (beta is a superset of stable)
 on:
   push:
     tags: ['v*']
@@ -19,10 +27,164 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  # ── 1. GUARD ────────────────────────────────────────────────────────────────
+  # Cheap, hermetic tag validation. No build, no network beyond the Forgejo API.
+  # Everything here is ALSO enforced server-side by scripts/pre-receive-tag-guard.sh
+  # (installed as a Forgejo pre-receive hook) so a bad tag is rejected at push time;
+  # this job is the in-CI backstop and the single source of the rules.
+  guard:
     runs-on: self-hosted
     steps:
-      # node:20-bookworm has node/git/curl but not php/zip; publish.sh needs python3 too.
+      - name: Toolchain
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            php-cli curl >/dev/null
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need every tag to check ordering + duplicates
+
+      - name: Validate tag (format · header · duplicate · ordering)
+        env:
+          FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          FORGEJO_URL: ${{ github.server_url }}
+          FORGEJO_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "Validating tag: $TAG"
+
+          # 1. FORMAT — vX.Y.Z for stable, vX.Y.Z-rcN for a release candidate. Nothing else.
+          if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$'; then
+            echo "::error::Tag '$TAG' is not a valid release tag. Use vX.Y.Z (stable) or vX.Y.Z-rcN (prerelease)." >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+
+          # 2. HEADER MATCH — the plugin header is what the updater compares against; it must
+          #    equal the tag, or stores get metadata pointing at the wrong package.
+          HDR="$(grep -m1 -oE 'Version:[[:space:]]*[0-9][0-9A-Za-z.-]*' wc-product-sync.php | sed -E 's/^Version:[[:space:]]*//')"
+          if [ "$VERSION" != "$HDR" ]; then
+            echo "::error::Tag '$TAG' disagrees with plugin header version '$HDR' (expected v$HDR)." >&2
+            exit 1
+          fi
+
+          # 3. DUPLICATE — git already refuses to overwrite an existing tag on push, but a
+          #    force-moved tag would slip through. Refuse if a release with a real ZIP asset
+          #    already exists for this version (i.e. we already shipped it).
+          API="$FORGEJO_URL/api/v1/repos/$FORGEJO_REPO"
+          code="$(curl -s -o /tmp/rel.json -w '%{http_code}' -H "Authorization: token $FORGEJO_TOKEN" "$API/releases/tags/$TAG" || true)"
+          if [ "$code" = "200" ]; then
+            has_zip="$(python3 -c "import json,sys; d=json.load(open('/tmp/rel.json')); print('yes' if any(a.get('name','').endswith('.zip') for a in d.get('assets',[])) else 'no')" 2>/dev/null || echo no)"
+            if [ "$has_zip" = "yes" ]; then
+              echo "::error::Version $TAG already has a published release with a ZIP. Bump the version instead of re-tagging." >&2
+              exit 1
+            fi
+          fi
+
+          # 4. ORDERING — the new version must be strictly greater than every existing release
+          #    tag. PHP version_compare knows that 0.9.27 > 0.9.27-rc7 and rc10 > rc2, which a
+          #    lexical/`sort -V` compare gets wrong for the rc<->stable boundary.
+          git fetch --tags --force --quiet || true
+          git tag -l 'v*' > /tmp/alltags.txt
+          php -r '
+            $new = $argv[1];
+            $max = null; $maxtag = null;
+            foreach (file($argv[2], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $t) {
+              $v = ltrim(trim($t), "v");
+              if (!preg_match("/^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$/", $v)) continue; // skip channel/junk tags
+              if ($v === $new) continue;                                              // exclude the tag being released
+              if ($max === null || version_compare($v, $max) > 0) { $max = $v; $maxtag = $t; }
+            }
+            if ($max !== null && version_compare($new, $max) <= 0) {
+              fwrite(STDERR, "::error::Out-of-order tag: v$new is not greater than the latest release $maxtag. Tags must move forward.\n");
+              exit(1);
+            }
+            fwrite(STDOUT, "ordering OK: v$new > " . ($maxtag ?: "(no prior tag)") . "\n");
+          ' "$VERSION" /tmp/alltags.txt
+
+          echo "Tag $TAG is valid."
+
+  # ── 2a. LINT ────────────────────────────────────────────────────────────────
+  lint:
+    needs: guard
+    runs-on: self-hosted
+    steps:
+      - name: Toolchain
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            php-cli zip unzip >/dev/null
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: PHP syntax
+        run: |
+          php -l wc-product-sync.php
+          for f in tests/*.php; do php -l "$f"; done
+
+      - name: Shell syntax
+        run: |
+          for f in build.sh publish.sh tests/*.sh; do bash -n "$f"; done
+
+      - name: Package builds
+        run: ./build.sh
+
+  # ── 2b. E2E ─────────────────────────────────────────────────────────────────
+  # Hermetic end-to-end: two throwaway WooCommerce stores as siblings on the DinD
+  # daemon, sync one into the other, assert parity. Same gate as the PR e2e, but on
+  # the tagged tree so "release only after confirmed tests" is literally true.
+  e2e:
+    needs: guard
+    runs-on: self-hosted
+    steps:
+      - name: Toolchain
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            ca-certificates curl gnupg zip unzip python3 iproute2 bc >/dev/null
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/debian/gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] \
+            https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            docker-ce-cli docker-compose-plugin >/dev/null
+          docker --version && docker compose version
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Point the Docker CLI at the DinD daemon
+        run: |
+          GW="$(ip route | awk '/default/{print $3}')"
+          echo "DOCKER_HOST=tcp://$GW:2375" >> "$GITHUB_ENV"
+          echo "daemon at tcp://$GW:2375"
+
+      - name: Daemon reachable
+        run: docker info --format 'server {{.ServerVersion}} / driver {{.Driver}}'
+
+      - name: Bring up the stack
+        run: tests/stack/up.sh
+
+      - name: Seed the source catalog
+        run: tests/stack/seed.sh
+
+      - name: Sync + parity + force-full + image/empty-source safety
+        run: tests/stack/e2e.sh
+
+  # ── 3. RELEASE ──────────────────────────────────────────────────────────────
+  # Only reached when guard passed AND both test jobs are green.
+  release:
+    needs: [lint, e2e]
+    runs-on: self-hosted
+    steps:
       - name: Toolchain
         run: |
           apt-get update -qq
@@ -32,9 +194,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-          # publish.sh pushes the channel tags (latest / latest-beta). Git refuses to push
-          # refs out of a shallow clone, which is why the `latest` tag silently failed to
-          # move on the v0.9.23 release while the asset swap succeeded.
+          # publish.sh pushes the channel tags (latest / latest-beta); a shallow clone
+          # can't push refs, which is why `latest` once silently failed to move.
           fetch-depth: 0
 
       - name: PHP syntax
@@ -42,13 +203,7 @@ jobs:
 
       - name: Build and publish
         env:
-          # A PAT with repo write access; falls back to the automatic per-run token.
           FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           FORGEJO_URL: ${{ github.server_url }}
           FORGEJO_REPO: ${{ github.repository }}
         run: ./publish.sh "${{ inputs.tag || github.ref_name }}"
-
-      # No upload-artifact step: actions/upload-artifact@v4 needs GitHub's artifact API v2,
-      # which Forgejo does not implement (GHESNotSupportedError), and it turned a successful
-      # v0.9.23 release red. It was redundant anyway — publish.sh attaches the ZIP and
-      # update.json to the release itself, which is the durable copy.
