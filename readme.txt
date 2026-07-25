@@ -4,7 +4,7 @@ Tags: woocommerce, product-sync, sku, batch-import
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.9.27-rc7
+Stable tag: 0.9.27-rc8
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -93,7 +93,7 @@ Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp t
 
 == Changelog ==
 
-= 0.9.27-rc7 =
+= 0.9.27-rc8 =
 
 * [krytyczne] Ochrona przed kolizją SKU wariacji — gdy SKU wariacji ze źródła zajmuje na celu inny produkt, SKU jest jednoznacznie sufiksowane; przy ponownej synchronizacji zachowywane bez cofania do kolidującej wartości (idempotentne) (#36)
 * [krytyczne] Total sync pomija dopasowanie po nazwie — obce produkty o zbieżnej nazwie nie „przeżywają" już kasowania przy lustrzeniu źródła (#32)
