@@ -1,6 +1,6 @@
 ## Zmiany (Changelog)
 
-### 0.9.27-rc7 — [krytyczne] kolizja SKU wariacji (#36) i total sync po nazwie (#32); i18n, logi, CI, readme.txt
+### 0.9.27-rc8 — [krytyczne] kolizja SKU wariacji (#36) i total sync po nazwie (#32); i18n, logi, CI, readme.txt
 
 - **[krytyczne] Ochrona przed kolizją SKU wariacji (#36).** Gdy SKU wariacji ze źródła zajmuje na celu
   **inny produkt**, zapis wariacji padał z `Invalid or duplicated SKU`, co przy synchronizacji produktu
