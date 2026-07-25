@@ -38,13 +38,30 @@ Publikacja jest zautomatyzowana — **wydanie robi tag**:
 git tag v0.9.23 && git push forgejo v0.9.23
 ```
 
-Tag `v*` uruchamia workflow **Release** (`.forgejo/workflows/release.yaml`), który woła `publish.sh`:
-buduje ZIP-a, tworzy wydanie `v0.9.23` z załącznikiem, a na koniec **podmienia `update.json`
-w wydaniu `latest`** — to ten ostatni krok faktycznie publikuje aktualizację dla sklepów.
+Tag `v*` uruchamia workflow **Release** (`.forgejo/workflows/release.yaml`) — potok z bramkami,
+w którym **każdy job blokuje następny**:
 
-`publish.sh` **odmawia publikacji, gdy tag nie zgadza się z wersją w nagłówku wtyczki** (`v0.9.23` ↔
-`Version: 0.9.23`) — literówka w bumpie wywala się na CI, zamiast wypchnąć metadane wskazujące na złą
-paczkę.
+1. **`guard`** — waliduje tag, zanim cokolwiek się zbuduje:
+   - **format** — `vX.Y.Z` (stabilna) albo `vX.Y.Z-rcN` (kandydat). Nic innego; tag bez `v`
+     (np. `0.9.27-rc7`) jest odrzucany.
+   - **zgodność z nagłówkiem** — `v0.9.23` ↔ `Version: 0.9.23`.
+   - **brak duplikatu** — jeśli wersja ma już wydanie z ZIP-em, potok pada („podbij numer").
+   - **kolejność** — nowy tag musi być **ściśle większy** od każdego istniejącego (PHP
+     `version_compare`: `0.9.27 > 0.9.27-rc9`, `rc10 > rc2`). Blokuje cofnięcie wersji.
+2. **`lint` + `e2e`** — te same testy co na PR, ale na **otagowanym drzewie**. Wydanie fizycznie
+   nie ruszy bez zielonych testów.
+3. **`release`** — `publish.sh`: buduje ZIP, tworzy wydanie `v0.9.23` z załącznikiem, a na koniec
+   **podmienia `update.json`** w kanale (`latest` dla stabilnej, `latest-beta` zawsze) — to ten
+   ostatni krok faktycznie publikuje aktualizację dla sklepów.
+
+`publish.sh` dodatkowo **odmawia publikacji, gdy tag nie zgadza się z wersją w nagłówku** — literówka
+w bumpie wywala się, zamiast wypchnąć metadane wskazujące na złą paczkę.
+
+**Twarda blokada u źródła (opcjonalna, zalecana):** te same reguły formatu/kolejności/duplikatu są
+w `scripts/pre-receive-tag-guard.sh` — zainstalowany jako **pre-receive hook** w Forgejo odrzuca zły
+tag już **przy `git push`** (guard w CI blokuje dopiero *wydanie*, a zły tag i tak ląduje w repo).
+Wymaga `[security] DISABLE_GIT_HOOKS = false` w `app.ini` Forgejo + restartu, potem: repo → Settings →
+Git Hooks → `pre-receive` → wklej skrypt.
 
 To samo ręcznie (gdy runner nie działa):
 
@@ -137,7 +154,7 @@ Workflows żyją w **`.forgejo/workflows/`** (jedyny katalog — Forgejo czyta w
 |---|---|---|
 | `ci.yaml` | push do `main`, PR | `php -l`, `bash -n`, **próbne zbudowanie paczki** (`./build.sh`). |
 | `e2e.yaml` | push do `main`, PR | Efemeryczne sklepy: parytet + force-full + **wydajność A/B**. |
-| `release.yaml` | tag `v*` | `publish.sh` — buduje ZIP, tworzy wydanie, podmienia `update.json` w kanale. |
+| `release.yaml` | tag `v*` | Bramkowany potok: **guard** (format/nagłówek/duplikat/kolejność) → **lint + e2e** na otagowanym drzewie → **release** (`publish.sh`). Wydanie tylko po zielonych testach. |
 
 **CI nie dotyka rigu LAN i nie ma żadnych sekretów.** Testy stawiają własne sklepy WooCommerce
 w kontenerach obok joba (ten sam demon DinD) i kasują je po sobie. Żadnego klucza SSH, żadnego
