@@ -1,5 +1,34 @@
 ## Zmiany (Changelog)
 
+### 0.9.27-rc7 — [krytyczne] kolizja SKU wariacji (#36) i total sync po nazwie (#32); i18n, logi, CI, readme.txt
+
+- **[krytyczne] Ochrona przed kolizją SKU wariacji (#36).** Gdy SKU wariacji ze źródła zajmuje na celu
+  **inny produkt**, zapis wariacji padał z `Invalid or duplicated SKU`, co przy synchronizacji produktu
+  zmiennego prowadziło do błędów **przy każdym przebiegu**. Teraz kolidujące SKU jest **jednoznacznie
+  sufiksowane** (np. `COLLIDE-1-{parent_id}`), a kolizje są rozstrzygane wsadowo z jednego zapytania do
+  bazy. Kluczowe: przy **ponownej** synchronizacji wariacja z już zsufiksowanym SKU jest **zachowywana
+  bez cofania** do surowej, kolidującej postaci — dedup działa więc **idempotentnie** (na CREATE i na
+  UPDATE), a błąd nie wraca w kolejnych przebiegach.
+- **[krytyczne] Total sync pomija dopasowanie po nazwie (#32).** Przy lustrzeniu źródła (total sync) obce
+  produkty na celu o **zbieżnej nazwie** były fałszywie „adoptowane" i **przeżywały** fazę twardego
+  usuwania brakujących — czyli produkty, których nie ma na źródle, nie były kasowane. Total sync
+  dopasowuje teraz **wyłącznie po SKU/`_wps_source_id`**, więc lustro źródła jest kompletne.
+- **Dopasowanie po nazwie obejmuje wersje robocze i prywatne (#25).** Fallback po nazwie brał wcześniej
+  pod uwagę **tylko** produkty `publish`; przy synchronizacji produktu w statusie `draft`/`private`
+  istniejący odpowiednik nie był znajdowany i powstawał **duplikat**. Dopasowanie uwzględnia teraz pełny
+  zestaw statusów synchronizacji.
+- **Bardziej szczegółowe logi (#34).** Pojedyncze akcje na produktach (utworzenie / aktualizacja /
+  pominięcie / błąd) logują się teraz z nazwą, ID i typem operacji do `WooCommerce → Status → Logi`
+  (`wc-product-sync`), co ułatwia diagnostykę dużych przebiegów.
+- **Internacjonalizacja (#23).** Wszystkie napisy interfejsu opakowane w funkcje tłumaczeń, dołączony
+  katalog `languages/wc-product-sync.pot` — wtyczkę można teraz tłumaczyć bez zmian w kodzie.
+- **readme.txt w stylu WordPress.org (#26).** Dodane standardowe metadane wtyczki (nagłówek, opis,
+  funkcje, changelog) w formacie `readme.txt`.
+- **CI: krok PHPCS-WP (#22).** Pipeline uruchamia teraz statyczną analizę zgodności z WordPress Coding
+  Standards (narzędzie było skonfigurowane, ale nigdy nie wywoływane).
+- **Testy e2e trybu promocji (#18/#21).** Pokrycie e2e dla `price_promotion_mode` — warianty `keep`,
+  `promo_to_base` i `base_after_promo`.
+
 ### 0.9.27-rc6 — kontrola propagacji cen promocyjnych ze źródła (#18)
 
 - **Tryb promocji** (`price_promotion_mode`) w sekcji „Modyfikator ceny" panelu wtyczki.
