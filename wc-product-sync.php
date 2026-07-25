@@ -771,6 +771,10 @@ $defaults = array(
 		if ( 'localhost' === $host || '::1' === $host ) {
 			return true;
 		}
+		// IPv6 loopback, link-local (fe80::/10), ULA (fd00::/8).
+		if ( preg_match( '/^(?:[fF][dD]|[fF][eE]80)/', $host ) ) {
+			return true;
+		}
 		// Docker / container service names, short hostnames — no TLD dot present.
 		if ( false === strpos( $host, '.' ) ) {
 			return true;
@@ -2373,12 +2377,12 @@ $defaults = array(
 			if ( $this->last_image_failed ) {
 				$stats['errors']++;
 				$this->report_add( 'errors', $base + array( 'reason' => 'nie pobrano obrazów (produkt zachowany, obrazy bez zmian)' ) );
-				$this->log( 'warning', sprintf( 'Obraz błędny: %s (SKU=%s)', $base['name'], $base['sku'] ) );
+				$this->log( 'warning', sprintf( 'Błąd obrazu: %s (SKU=%s)', $base['name'], $base['sku'] ) );
 			}
 			if ( $this->last_variation_failed ) {
 				$stats['errors']++;
 				$this->report_add( 'errors', $base + array( 'reason' => 'część wariacji nie została zsynchronizowana (szczegóły w logu)' ) );
-				$this->log( 'warning', sprintf( 'Wariacje błędne: %s (SKU=%s)', $base['name'], $base['sku'] ) );
+				$this->log( 'warning', sprintf( 'Wystąpiły błędy w wariacjach: %s (SKU=%s)', $base['name'], $base['sku'] ) );
 			}
 			if ( 'created' === $result ) {
 				// Tag the product with the run that created it, so "undo last sync" can trash
@@ -2967,8 +2971,58 @@ $defaults = array(
 		// private (or draft) flip changes which children feed the parent min/max price.
 		$rollup_props = array( 'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_to', 'stock_quantity', 'stock_status', 'manage_stock', 'status' );
 
-		$kept = array();
+	// Batch: pre-resolve SKU collision parents in a single query (avoids N+1 per variation).
+	$dedup_parents = array(); // sku → conflict_parent_id for in-memory dedup lookup.
+	$collision_skus = array(); // unique SKUs that need global conflict checking.
+
+	if ( ! $this->fast_mode ) {
 		foreach ( $source_vars as $sv ) {
+			$svsku = isset( $sv['sku'] ) ? trim( $sv['sku'] ) : '';
+			if ( empty( $svsku ) ) {
+				continue;
+			}
+			// Only check SKUs that don't match a local variation (local matches are fine).
+			$local_vid = isset( $by_sku[ $svsku ] ) ? $by_sku[ $svsku ] : null;
+			if ( $local_vid ) {
+				continue;
+			}
+			// Avoid duplicate global checks for the same SKU appearing multiple times.
+			if ( isset( $collision_skus[ $svsku ] ) ) {
+				continue;
+			}
+			$global_vid = self::sku_to_id( $svsku );
+			if ( $global_vid && $global_vid !== $local_vid ) {
+				// SKU is occupied globally — defer parent resolution to the batch query.
+				$collision_skus[ $svsku ] = $global_vid;
+			}
+		}
+
+		if ( ! empty( $collision_skus ) ) {
+			global $wpdb;
+			$id_placeholders = implode( ',', array_fill( 0, count( $collision_skus ), '%d' ) );
+			$ids             = array_values( $collision_skus );
+			// Resolve all conflicting SKUs: include product_variation (use their post_parent)
+			// and product types (post_parent=0 → falls back to target_parent_id).
+			$results         = $wpdb->get_results(
+				$wpdb->prepare(
+					"SELECT ID, post_parent FROM {$wpdb->posts} WHERE ID IN ($id_placeholders) AND post_type IN ('product', 'product_variation')",
+					$ids
+				),
+				ARRAY_A
+			);
+			// Build ID→SKU map via array_flip for O(1) lookup instead of O(n*m) nested loop.
+			$id_to_sku = array_flip( $collision_skus ); // value → key (id → sku).
+			foreach ( $results as $row ) {
+				$row_id = intval( $row["ID"] );
+				if ( isset( $id_to_sku[ $row_id ] ) ) {
+					$dedup_parents[ $id_to_sku[ $row_id ] ] = intval( $row["post_parent"] );
+				}
+			}
+		}
+	}
+
+	$kept = array();
+	foreach ( $source_vars as $sv ) {
 			$vid = null; // resolved match for THIS source variation; reset before any throw point so
 			             // the catch never keeps a stale id from a previous iteration.
 			try {
@@ -2988,13 +3042,37 @@ $defaults = array(
 				if ( ! $is_update && $this->fast_mode ) {
 					continue;
 				}
+
 				$variation = $vid ? wc_get_product( $vid ) : new WC_Product_Variation();
 				if ( ! $variation ) {
 					$variation = new WC_Product_Variation();
 				}
 				$variation->set_parent_id( $target_parent_id );
+
+				// SKU collision guard: if a source SKU collides globally on another product,
+						// append the target_parent_id to make it unique (e.g. "COLLIDE-1-{pid}").
+						// $dedup_parents is rebuilt each batch pass from live DB data.
+						$dedup_sku = $svsku;
+						if ( ! $this->fast_mode ) {
+							$current_sku = $vid ? $variation->get_sku() : '';
+							// No local variation yet or source has no SKU — apply guard to source SKU.
+							if ( '' === $current_sku && $svsku && isset( $dedup_parents[ $svsku ] ) ) {
+								$conflict_parent = $dedup_parents[ $svsku ];
+								$suffix          = $conflict_parent ? $conflict_parent : $target_parent_id;
+								if ( $suffix ) {
+									$dedup_sku = $svsku . '-' . $suffix;
+								}
+							// Existing variation whose SKU is already suffixed (e.g. "COLLIDE-1-{pid}") —
+							// keep it as-is so re-sync doesn't flip back to the raw colliding form.
+							} elseif ( '' !== $current_sku && strpos( $current_sku, $svsku . '-' ) === 0 ) {
+								$dedup_sku = $current_sku;
+							// Existing variation whose SKU is already a known dedup key — keep as-is.
+							} elseif ( '' !== $current_sku && isset( $dedup_parents[ $current_sku ] ) ) {
+								$dedup_sku = $current_sku;
+							}
+						}
 				if ( $svsku ) {
-					$variation->set_sku( $svsku );
+					$variation->set_sku( $dedup_sku );
 				}
 				$variation->set_status( ( $sv['status'] ?? 'publish' ) === 'private' ? 'private' : 'publish' );
 				if ( $this->field_on( 'price' ) ) {
