@@ -278,7 +278,14 @@ co wcześniej **przerywało każdy przebieg**. Endpoint został wyłącznie jako
 - Produkty: `simple`, `variable`, `grouped`
 - Dopasowanie po **SKU**, następnie po `_wps_source_id`, a na końcu po **nazwie** (`post_title`) —
   i to tylko wtedy, gdy nazwa trafia w **dokładnie jeden** lokalny produkt, nieprzypisany do innego
-  źródła (`wc-product-sync.php:1984`)
+  źródła (`wc-product-sync.php:2513`). Gdy nazwa pasuje do **2+** takich kandydatów, sync **nie
+  zgaduje** który zaktualizować — tworzenie nowego produktu jest pomijane i logowane do ręcznej
+  weryfikacji, zamiast tworzyć kolejny duplikat (`wc-product-sync.php:2711`, #42)
+- **Total sync** (lustrzenie źródła) pomija dopasowanie po nazwie w swojej głównej fazie — polega na
+  wcześniejszej fazie scalania (`adopt_existing`), która stosuje tę samą zasadę „dokładnie jeden
+  nieprzypisany kandydat" zanim total sync zacznie kasować z celu produkty, których nie ma na źródle.
+  To celowe: dopasowanie po nazwie wprost w fazie total sync mogłoby „przywłaszczyć" ręcznie dodany
+  produkt o zbieżnej nazwie i wystawić go na skasowanie w tym samym przebiegu (#32)
 - **Atrybuty — tylko na produktach `variable`** (globalne `pa_*` i lokalne). Zweryfikowane: taksonomia
   jest zakładana na celu, terminy i przypisania wariacji dojeżdżają poprawnie
 - Kategorie (tworzy brakujące)
