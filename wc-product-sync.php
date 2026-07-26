@@ -122,6 +122,14 @@ final class WC_Product_Sync {
 	/** "Total sync" (mirror-the-source) run: for THIS run only, force force_full + hard delete,
 	 *  regardless of the saved settings. Carried across batches in the progress transient. */
 	private $total_sync = false;
+	/** Set by find_existing_product() when its name-fallback saw 2+ equally-valid candidates for
+	 *  the CURRENT source product — i.e. it could resolve neither by SKU/source_id nor uniquely by
+	 *  name. create_new_product() checks this right after to skip creation instead of guessing
+	 *  which candidate to update (#42). Reset at the top of every find_existing_product() call. */
+	private $last_match_ambiguous = false;
+	/** Cache of source IDs the just-completed total-sync adopt phase could not resolve
+	 *  unambiguously (see is_ambiguous_adopt_candidate()). Null until first read this request. */
+	private $ambiguous_source_ids;
 	/** Ostatnie nagłówki odpowiedzi REST API (X-WP-TotalPages) */
 	private $last_api_headers = array();
 
@@ -2481,7 +2489,8 @@ $defaults = array(
 	 */
 	private function find_existing_product( array $p ) {
 
-		$this->last_match_method = '';
+		$this->last_match_method    = '';
+		$this->last_match_ambiguous = false;
 		$sku = $this->require_sku( $p );
 		if ( '' !== $sku ) {
 			$id = self::sku_to_id( $sku );
@@ -2520,21 +2529,35 @@ $defaults = array(
 			// so SKU-less drafts/private products are found under their non-publish status too.
 			$sync_statuses = apply_filters( 'wps_sync_statuses', (array) $this->get_options()['sync_statuses'], '' );
 			$post_status   = ! empty( $sync_statuses ) ? array_unique( (array) $sync_statuses ) : array( 'publish' );
+			// posts_per_page: -1 (was 2) — a cap of 2 meant 3+ same-named targets were never even
+			// considered, always falling through to create_new_product (#42, Problem B).
 			$found         = get_posts( array(
 				'post_type'      => 'product',
 				'title'          => $name,
 				'post_status'    => $post_status,
-				'posts_per_page' => 2,
+				'posts_per_page' => -1,
 				'fields'         => 'ids',
 			) );
-			if ( $found && count( $found ) === 1 ) {
-				$pid = (int) $found[0];
-				$existing_src = get_post_meta( $pid, self::META_SOURCE_ID, true );
-				// Dopuszczamy jeśli produkt jest nieprzypisany lub należy do tego samego źródła.
+			// Eligible = nieprzypisany (brak _wps_source_id) lub przypisany do TEGO źródła — inny
+			// przypisany produkt o tej samej nazwie to naprawdę inny produkt, nie nasz. Wymagamy
+			// dokładnie JEDNEGO eligible kandydata: 0 → brak dopasowania (nowy produkt), 2+ → nie
+			// zgadujemy który to "nasz" (dawniej: count($found)===1 nad WSZYSTKIMI, więc już 2
+			// dowolne produkty o tej nazwie — nawet oba obce — blokowały dopasowanie; #42, Problem C).
+			$eligible = array();
+			foreach ( (array) $found as $pid ) {
+				$existing_src = get_post_meta( (int) $pid, self::META_SOURCE_ID, true );
 				if ( '' === $existing_src || (string) $existing_src === (string) $src_id ) {
-					$this->last_match_method = 'nazwę';
-					return $pid;
+					$eligible[] = (int) $pid;
 				}
+			}
+			if ( 1 === count( $eligible ) ) {
+				$this->last_match_method = 'nazwę';
+				return $eligible[0];
+			}
+			if ( count( $eligible ) > 1 ) {
+				// Ambiguous: several equally-valid candidates, no safe way to pick one. Signal the
+				// caller so create_new_product() skips instead of guessing (and duplicating).
+				$this->last_match_ambiguous = true;
 			}
 		}
 
@@ -2683,6 +2706,19 @@ $defaults = array(
 		// Fast field-refresh is update-only: never create products the daily full sync would create.
 		if ( $this->fast_mode ) {
 			$this->last_skip_reason = 'szybka synchronizacja: nowe produkty pomijane (tylko aktualizacja)';
+			return 'skipped';
+		}
+		// Niejednoznaczne dopasowanie po nazwie — kilku równie ważnych kandydatów na celu (inline
+		// fallback) lub scalanie total sync zgłosiło ten produkt źródłowy jako "ambiguous" (zbyt
+		// wiele/za mało nieprzypisanych kandydatów o tej nazwie). Bez tej blokady każde ponowne
+		// uruchomienie total sync tworzyłoby KOLEJNY duplikat w nieskończoność (#42) — bezpieczniej
+		// pominąć i zgłosić do ręcznego scalenia, niż zgadywać który istniejący produkt zaktualizować.
+		if ( $this->last_match_ambiguous || ( $this->total_sync && $this->is_ambiguous_adopt_candidate( (int) ( $p['id'] ?? 0 ) ) ) ) {
+			$this->last_skip_reason = 'niejednoznaczne dopasowanie po nazwie na celu — wymaga ręcznego scalenia';
+			$this->log( 'warning', sprintf(
+				'Pominięto tworzenie „%s" (SKU=%s) — niejednoznaczne dopasowanie po nazwie na celu (kilku kandydatów). Scal ręcznie lub popraw SKU/ID źródła.',
+				$p['name'] ?? '?', $sku ?: '(brak)'
+			) );
 			return 'skipped';
 		}
 		if ( $dry_run ) {
@@ -3508,9 +3544,15 @@ $defaults = array(
 	/** Find the single UNCLAIMED local product with this exact name, or 0 if none / ambiguous.
 	 *  Any status (unlike the sync's publish-only name fallback) — an adoption tool should be able
 	 *  to claim a draft the store already had. Uniqueness is required among unclaimed products, so
-	 *  a name shared by several candidates is never guessed. */
-	private function unclaimed_by_name( $name ) {
-		$name = trim( (string) $name );
+	 *  a name shared by several candidates is never guessed.
+	 *  $candidates (by ref, optional) receives the unclaimed-match count (0, 1, or 2+) so callers
+	 *  can tell "nothing to adopt — a brand new product, nothing wrong" apart from "2+ candidates,
+	 *  genuinely can't pick one" — those two both return 0 here but need different handling (#42:
+	 *  conflating them made adopt_process_product() flag every never-before-seen source product as
+	 *  "ambiguous", which then blocked total sync from ever creating it). */
+	private function unclaimed_by_name( $name, &$candidates = null ) {
+		$name       = trim( (string) $name );
+		$candidates = 0;
 		if ( '' === $name ) {
 			return 0;
 		}
@@ -3521,8 +3563,32 @@ $defaults = array(
 			'posts_per_page' => -1,
 			'fields'         => 'ids',
 		) );
-		$unclaimed = array_values( array_filter( $ids, array( $this, 'is_unclaimed' ) ) );
-		return count( $unclaimed ) === 1 ? (int) $unclaimed[0] : 0;
+		$unclaimed  = array_values( array_filter( $ids, array( $this, 'is_unclaimed' ) ) );
+		$candidates = count( $unclaimed );
+		return 1 === $candidates ? (int) $unclaimed[0] : 0;
+	}
+
+	/** True when the total-sync adopt phase that just ran (chained from handle_total_sync) saw
+	 *  this source product's name match 2+ unclaimed local candidates and refused to guess
+	 *  (adopt_process_product() → $plan['ambiguous']). create_new_product() uses this to skip
+	 *  creating yet another duplicate for it instead of blindly making one on every run (#42).
+	 *  Reads the adopt plan the mirror phase was chained from (run_adopt_event stores it in the
+	 *  'wps_adopt_preview' transient, 30 min TTL — ample for the mirror sync that follows it).
+	 *  Cached per-request: one transient read per batch, not per product. */
+	private function is_ambiguous_adopt_candidate( int $src_id ) {
+		if ( ! $src_id ) {
+			return false;
+		}
+		if ( null === $this->ambiguous_source_ids ) {
+			$this->ambiguous_source_ids = array();
+			$plan = get_transient( 'wps_adopt_preview' );
+			if ( is_array( $plan ) && ! empty( $plan['ambiguous'] ) ) {
+				foreach ( $plan['ambiguous'] as $row ) {
+					$this->ambiguous_source_ids[ (int) ( $row['source_id'] ?? 0 ) ] = true;
+				}
+			}
+		}
+		return isset( $this->ambiguous_source_ids[ $src_id ] );
 	}
 
 	/** Reconcile the target with the source: stamp _wps_source_id onto EXISTING unclaimed products so
@@ -3620,8 +3686,9 @@ $defaults = array(
 			$plan['claimed']++;
 			return;
 		}
-		$local = 0;
-		$how   = '';
+		$local           = 0;
+		$how             = '';
+		$name_candidates = 0;
 		if ( '' !== $sku ) {
 			$cand = self::sku_to_id( $sku );
 			if ( $cand && $this->is_unclaimed( $cand ) ) {
@@ -3630,7 +3697,7 @@ $defaults = array(
 			}
 		}
 		if ( ! $local ) {
-			$cand = $this->unclaimed_by_name( $name );
+			$cand = $this->unclaimed_by_name( $name, $name_candidates );
 			if ( $cand ) {
 				$local = $cand;
 				$how   = 'nazwa';
@@ -3641,9 +3708,14 @@ $defaults = array(
 			if ( $apply ) {
 				update_post_meta( $local, self::META_SOURCE_ID, (string) $src_id );
 			}
-		} else {
+		} elseif ( '' === $sku && '' === $name ) {
+			$plan['ambiguous'][] = array( 'source_id' => $src_id, 'sku' => $sku, 'name' => $name, 'reason' => 'brak SKU i nazwy' );
+		} elseif ( $name_candidates > 1 ) {
+			// Genuinely stuck: 2+ unclaimed local products share this name, no safe pick (#42).
+			// A plain "nothing matched" (0 candidates) is NOT reported here — that's just a
+			// product the target has never seen before, which total sync will create fresh.
 			$plan['ambiguous'][] = array( 'source_id' => $src_id, 'sku' => $sku, 'name' => $name,
-				'reason' => '' === $sku && '' === $name ? 'brak SKU i nazwy' : 'brak jednoznacznego dopasowania na celu' );
+				'reason' => 'kilku nieprzypisanych kandydatów o tej nazwie na celu' );
 		}
 	}
 
