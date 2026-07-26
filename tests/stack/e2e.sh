@@ -1193,5 +1193,88 @@ echo "    'No SKU Item' count after sync: $N19 (must stay 3, not grow to 4)"
 [ "$N19" -eq 3 ] || { echo "  FAIL: name-fallback created a duplicate instead of recognizing 3 ambiguous same-named candidates (got $N19)" >&2; exit 1; }
 echo "  PASS: name-fallback does not duplicate when multiple same-named candidates exist"
 
+# --- Phase 20: the ambiguous-match protection also applies to VARIABLE products --------------
+#
+# create_new_product() is shared by upsert_simple() and upsert_variable() — the #42 ambiguous-skip
+# check sits before the class-specific branch, so it should behave identically for variable
+# products. Proves it: a variable product hitting the same "2+ unclaimed same-name targets"
+# scenario as Phase 18 must not duplicate, and once resolved must sync its variations.
+echo "==> Phase 20: variable-product ambiguous name match does not duplicate on total sync"
+opt per_page 10; opt sync_batch_limit 100; opt max_batch_seconds 0
+opt force_full_sync 0; opt deletion_mode none
+
+swp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$p = new WC_Product_Variable();
+$p->set_name( "Shared Variable Item" ); $p->set_sku( "SV-SHARED" ); $p->set_status( "publish" );
+$attr = new WC_Product_Attribute(); $attr->set_name( "Rozmiar" ); $attr->set_options( array( "S", "M" ) ); $attr->set_visible( true ); $attr->set_variation( true );
+$p->set_attributes( array( $attr ) );
+$pid = $p->save();
+foreach ( array( "S", "M" ) as $size ) {
+  $v = new WC_Product_Variation(); $v->set_parent_id( $pid ); $v->set_sku( "SV-SHARED-$size" ); $v->set_attributes( array( "rozmiar" => $size ) ); $v->set_regular_price( "20" ); $v->save();
+}
+WC_Product_Variable::sync( $pid );' >/dev/null
+
+twp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+foreach ( array(1,2) as $i ) { $p=new WC_Product_Variable(); $p->set_name("Shared Variable Item"); $p->set_status("publish"); $p->save(); }' >/dev/null
+
+BASELINE20="$(twp eval 'echo count(get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Shared Variable Item")));')"
+
+run_total
+N20_AFTER_1="$(twp eval 'echo count(get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Shared Variable Item")));')"
+run_total
+N20_AFTER_2="$(twp eval 'echo count(get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Shared Variable Item")));')"
+FINAL_SKU20="$(twp eval '$ids=get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Shared Variable Item")); $p=$ids?wc_get_product($ids[0]):null; echo $p?$p->get_sku():"none";')"
+FINAL_KIDS20="$(twp eval '$ids=get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Shared Variable Item")); $p=$ids?wc_get_product($ids[0]):null; echo $p?count($p->get_children()):-1;')"
+echo "    'Shared Variable Item' count: baseline=$BASELINE20, after run 1=$N20_AFTER_1, after run 2=$N20_AFTER_2, sku=$FINAL_SKU20, variations=$FINAL_KIDS20"
+
+[ "$N20_AFTER_1" -le "$BASELINE20" ] || { echo "  FAIL: total sync created a phantom duplicate variable product for an ambiguous name match ($BASELINE20 -> $N20_AFTER_1)" >&2; exit 1; }
+[ "$N20_AFTER_2" -eq 1 ] || { echo "  FAIL: did not converge to exactly one variable product after 2 runs (got $N20_AFTER_2)" >&2; exit 1; }
+[ "$FINAL_SKU20" = "SV-SHARED" ] || { echo "  FAIL: the surviving product is not the correctly-linked one (sku=$FINAL_SKU20)" >&2; exit 1; }
+[ "$FINAL_KIDS20" -eq 2 ] || { echo "  FAIL: variations did not sync onto the resolved product (children=$FINAL_KIDS20, expected 2)" >&2; exit 1; }
+echo "  PASS: the same ambiguous-match protection applies to variable products, variations sync once resolved"
+
+# --- Phase 21: a dry run reports an ambiguous match as SKIPPED, not created -------------------
+#
+# create_new_product()'s ambiguous-skip check runs before the dry-run branch, so a dry run must
+# also report "pominięto" (skipped) for an ambiguous match, not log a [DRY] CREATE line — a
+# preview promising a create the real run would never perform would mislead the operator.
+echo "==> Phase 21: dry run reports an ambiguous name match as skipped, not created"
+opt force_full_sync 0
+
+swp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$p=new WC_Product_Simple(); $p->set_name("Dry Ambiguous Item"); $p->set_regular_price("40"); $p->set_status("publish"); $p->save();' >/dev/null
+
+twp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+foreach ( array(1,2) as $i ) { $p=new WC_Product_Simple(); $p->set_name("Dry Ambiguous Item"); $p->set_regular_price("1"); $p->set_status("publish"); $p->save(); }' >/dev/null
+
+DRY21="$(twp eval '
+$s=WC_Product_Sync::instance();
+$dm=new ReflectionProperty("WC_Product_Sync","dry_mode");$dm->setAccessible(true);$dm->setValue($s,true);
+$rr=new ReflectionMethod("WC_Product_Sync","reset_run_result");$rr->setAccessible(true);$rr->invoke($s,true);
+$sd=new ReflectionMethod("WC_Product_Sync","seed_sync_progress");$sd->setAccessible(true);$sd->invoke($s);
+$cron=new ReflectionMethod("WC_Product_Sync","run_sync_cron");$cron->setAccessible(true);$cron->invoke($s);
+$b=0; while(get_transient("wps_sync_progress")){ if(++$b>60)break; $r=new ReflectionMethod("WC_Product_Sync","run_resume_batch");$r->setAccessible(true);$r->invoke($s); }
+$res=get_option("wps_last_sync_result");
+$rep=get_option("wps_last_sync_report");
+$reason="none";
+foreach ( (array)($rep["skipped"]??array()) as $e ) { if ( ($e["name"]??"")==="Dry Ambiguous Item" ) { $reason=$e["reason"]; break; } }
+echo ($res["created"]??-1)." ".($res["skipped"]??-1)." ".$reason;')"
+read CREATED21 SKIPPED21 REASON21 <<<"$DRY21"
+N21_AFTER="$(twp eval 'echo count(get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Dry Ambiguous Item")));')"
+echo "    dry run: created=$CREATED21 skipped=$SKIPPED21 reason=[$REASON21] target_count_after=$N21_AFTER (must stay 2)"
+
+[ "$CREATED21" -eq 0 ] || { echo "  FAIL: dry run reported a create for an ambiguous match (created=$CREATED21)" >&2; exit 1; }
+[ "$SKIPPED21" -ge 1 ] || { echo "  FAIL: dry run did not report the ambiguous item as skipped (skipped=$SKIPPED21)" >&2; exit 1; }
+case "$REASON21" in
+	*niejednoznaczne*) ;;
+	*) echo "  FAIL: skip reason does not mention the ambiguity (reason=$REASON21)" >&2; exit 1 ;;
+esac
+[ "$N21_AFTER" -eq 2 ] || { echo "  FAIL: dry run wrote to the target (count=$N21_AFTER, expected unchanged 2)" >&2; exit 1; }
+echo "  PASS: dry run correctly reports the ambiguous match as skipped, writes nothing"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report)"
