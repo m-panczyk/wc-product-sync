@@ -2502,11 +2502,11 @@ $defaults = array(
 		}
 
 		// 3) Fallback: szukaj po nazwie.
-				//    Tylko jeśli znaleziony produkt jest nieprzypisany (brak _wps_source_id)
-				//    lub przypisany do tego samego źródła — w przeciwnym razie to inny
-				//    produkt o tej samej nazwie, nie nasz.
-				//    Bezpieczne nawet w total_sync: check na L2534 gwarantuje, że nie nadpiszemy
-				//    istniejącego zsynchronizowanego produktu (ma _wps_source_id ≠ 0) obcym ID.
+			//    Tylko jeśli znaleziony produkt jest nieprzypisany (brak _wps_source_id)
+			//    lub przypisany do tego samego źródła — w przeciwnym razie to inny
+			//    produkt o tej samej nazwie, nie nasz.
+			//    Bezpieczne nawet w total_sync: check na L2534 gwarantuje, że nie nadpiszemy
+			//    istniejącego zsynchronizowanego produktu (ma _wps_source_id ≠ 0) obcym ID.
 			$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
 			if ( '' !== $name && ! empty( $p['id'] ) ) {
 			$src_id  = absint( $p['id'] );
