@@ -4,7 +4,7 @@ Tags: woocommerce, product-sync, sku, batch-import
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.9.27-rc8
+Stable tag: 0.9.27-rc9
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -92,6 +92,12 @@ define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxx' ); // prywatne repozytorium
 Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp transient delete wps_update_info`.
 
 == Changelog ==
+
+= 0.9.27-rc9 =
+
+* [krytyczne] Total sync nie duplikuje już produktów przy niejednoznacznym dopasowaniu po nazwie — zamiast tworzyć kolejny duplikat przy każdym przebiegu, pomija tworzenie takiego produktu i loguje do ręcznej weryfikacji (#42)
+* Naprawiono dopasowanie po nazwie w zwykłej synchronizacji przy 2+ produktach o tej samej nazwie na celu (#42)
+* Testy e2e: ochrona #32 podczas total sync, brak duplikatu przy niejednoznaczności (produkty proste i wariantowe), poprawne raportowanie w trybie dry-run
 
 = 0.9.27-rc8 =
 
