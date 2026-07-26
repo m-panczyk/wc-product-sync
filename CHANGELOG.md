@@ -1,5 +1,24 @@
 ## Zmiany (Changelog)
 
+### 0.9.27-rc9 — [krytyczne] duplikaty produktów przy total sync z niejednoznacznym dopasowaniem po nazwie (#42)
+
+- **[krytyczne] Total sync nie duplikuje już produktów przy niejednoznacznym dopasowaniu po nazwie (#42).**
+  Gdy 2+ nieprzypisane produkty na celu miały tę samą nazwę, faza scalania (adopt) poprawnie odmawiała
+  zgadywania, ale nic nie powstrzymywało utworzenia **kolejnego** duplikatu przy każdym przebiegu total
+  sync — liczba produktów rosła bez końca. Total sync teraz pomija tworzenie dla takich produktów (loguje
+  do ręcznej weryfikacji) zamiast zgadywać lub duplikować; produkt, który nigdy wcześniej nie istniał na
+  celu, jest nadal tworzony normalnie — pomijane jest wyłącznie tworzenie dla NAPRAWDĘ niejednoznacznych
+  przypadków (2+ nieprzypisanych kandydatów o tej samej nazwie).
+- **Naprawiono dopasowanie po nazwie w zwykłej (nie-total) synchronizacji.** `posts_per_page` ograniczone
+  do 2 kandydatów oraz wymóg dokładnie 1 dopasowania nad **wszystkimi** produktami (nie tylko
+  nieprzypisanymi) powodowały identyczny problem przy 2+ produktach o tej samej nazwie na celu.
+- Ochrona przed #32 (blokada dopasowania po nazwie w total sync, wprowadzona w rc7/rc8) **pozostaje bez
+  zmian** — rozwiązanie #42 nie polega na jej usunięciu, tylko na naprawie mechanizmu scalania, który już
+  wcześniej bezpiecznie obsługiwał ten sam problem.
+- Nowe testy e2e (fazy 17–21): ochrona #32 podczas total sync, brak duplikatu przy niejednoznaczności
+  (produkty proste i wariantowe), zbieżność do jednego poprawnie zlinkowanego produktu po kolejnych
+  przebiegach, poprawne raportowanie „pominięto" (nie „utworzono") w trybie dry-run.
+
 ### 0.9.27-rc8 — [krytyczne] kolizja SKU wariacji (#36) i total sync po nazwie (#32); i18n, logi, CI, readme.txt
 
 - **[krytyczne] Ochrona przed kolizją SKU wariacji (#36).** Gdy SKU wariacji ze źródła zajmuje na celu
