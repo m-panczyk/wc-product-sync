@@ -2502,29 +2502,24 @@ $defaults = array(
 		}
 
 		// 3) Fallback: szukaj po nazwie.
-			//    Tylko jeśli znaleziony produkt jest nieprzypisany (brak _wps_source_id)
-			//    lub przypisany do tego samego źródła — w przeciwnym razie to inny
-			//    produkt o tej samej nazwie, nie nasz.
-			//    W trybie total sync pomijamy dopasowanie po nazwie, aby zewnętrzne/manualnie
-			//    dodane produkty (bez _wps_source_id) nie zostały „pochłonięte" przez aktualizację
-			//    i przetrwały do siłowego usunięcia przez force-full / soft-delete (#32).
+				//    Tylko jeśli znaleziony produkt jest nieprzypisany (brak _wps_source_id)
+				//    lub przypisany do tego samego źródła — w przeciwnym razie to inny
+				//    produkt o tej samej nazwie, nie nasz.
+				//    Bezpieczne nawet w total_sync: check na L2534 gwarantuje, że nie nadpiszemy
+				//    istniejącego zsynchronizowanego produktu (ma _wps_source_id ≠ 0) obcym ID.
 			$name = isset( $p['name'] ) ? trim( $p['name'] ) : '';
-			if ( '' !== $name && ! empty( $p['id'] ) && ! $this->total_sync ) {
+			if ( '' !== $name && ! empty( $p['id'] ) ) {
 			$src_id  = absint( $p['id'] );
-			// 'title' (exact match), NOT 'post_title' — WP_Query has no 'post_title' arg, so it was
-			// silently IGNORED: the query returned products regardless of name. With one candidate
-			// on the target that meant every unmatched source product falsely matched it (wrong
-			// product overwritten); with many, it always saw 2 and never matched (SKU-less/renamed
-			// products duplicated instead). The whole name fallback never actually matched by name.
 			// Use the same status set the run is syncing (wps_sync_statuses), not just 'publish',
 			// so SKU-less drafts/private products are found under their non-publish status too.
+			// Increase posts_per_page so we don't cap at 2 results and miss the match.
 			$sync_statuses = apply_filters( 'wps_sync_statuses', (array) $this->get_options()['sync_statuses'], '' );
 			$post_status   = ! empty( $sync_statuses ) ? array_unique( (array) $sync_statuses ) : array( 'publish' );
 			$found         = get_posts( array(
 				'post_type'      => 'product',
 				'title'          => $name,
 				'post_status'    => $post_status,
-				'posts_per_page' => 2,
+				'posts_per_page' => 100,
 				'fields'         => 'ids',
 			) );
 			if ( $found && count( $found ) === 1 ) {
