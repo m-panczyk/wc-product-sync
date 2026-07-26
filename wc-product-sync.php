@@ -3544,9 +3544,15 @@ $defaults = array(
 	/** Find the single UNCLAIMED local product with this exact name, or 0 if none / ambiguous.
 	 *  Any status (unlike the sync's publish-only name fallback) — an adoption tool should be able
 	 *  to claim a draft the store already had. Uniqueness is required among unclaimed products, so
-	 *  a name shared by several candidates is never guessed. */
-	private function unclaimed_by_name( $name ) {
-		$name = trim( (string) $name );
+	 *  a name shared by several candidates is never guessed.
+	 *  $candidates (by ref, optional) receives the unclaimed-match count (0, 1, or 2+) so callers
+	 *  can tell "nothing to adopt — a brand new product, nothing wrong" apart from "2+ candidates,
+	 *  genuinely can't pick one" — those two both return 0 here but need different handling (#42:
+	 *  conflating them made adopt_process_product() flag every never-before-seen source product as
+	 *  "ambiguous", which then blocked total sync from ever creating it). */
+	private function unclaimed_by_name( $name, &$candidates = null ) {
+		$name       = trim( (string) $name );
+		$candidates = 0;
 		if ( '' === $name ) {
 			return 0;
 		}
@@ -3557,8 +3563,9 @@ $defaults = array(
 			'posts_per_page' => -1,
 			'fields'         => 'ids',
 		) );
-		$unclaimed = array_values( array_filter( $ids, array( $this, 'is_unclaimed' ) ) );
-		return count( $unclaimed ) === 1 ? (int) $unclaimed[0] : 0;
+		$unclaimed  = array_values( array_filter( $ids, array( $this, 'is_unclaimed' ) ) );
+		$candidates = count( $unclaimed );
+		return 1 === $candidates ? (int) $unclaimed[0] : 0;
 	}
 
 	/** True when the total-sync adopt phase that just ran (chained from handle_total_sync) saw
@@ -3679,8 +3686,9 @@ $defaults = array(
 			$plan['claimed']++;
 			return;
 		}
-		$local = 0;
-		$how   = '';
+		$local           = 0;
+		$how             = '';
+		$name_candidates = 0;
 		if ( '' !== $sku ) {
 			$cand = self::sku_to_id( $sku );
 			if ( $cand && $this->is_unclaimed( $cand ) ) {
@@ -3689,7 +3697,7 @@ $defaults = array(
 			}
 		}
 		if ( ! $local ) {
-			$cand = $this->unclaimed_by_name( $name );
+			$cand = $this->unclaimed_by_name( $name, $name_candidates );
 			if ( $cand ) {
 				$local = $cand;
 				$how   = 'nazwa';
@@ -3700,9 +3708,14 @@ $defaults = array(
 			if ( $apply ) {
 				update_post_meta( $local, self::META_SOURCE_ID, (string) $src_id );
 			}
-		} else {
+		} elseif ( '' === $sku && '' === $name ) {
+			$plan['ambiguous'][] = array( 'source_id' => $src_id, 'sku' => $sku, 'name' => $name, 'reason' => 'brak SKU i nazwy' );
+		} elseif ( $name_candidates > 1 ) {
+			// Genuinely stuck: 2+ unclaimed local products share this name, no safe pick (#42).
+			// A plain "nothing matched" (0 candidates) is NOT reported here — that's just a
+			// product the target has never seen before, which total sync will create fresh.
 			$plan['ambiguous'][] = array( 'source_id' => $src_id, 'sku' => $sku, 'name' => $name,
-				'reason' => '' === $sku && '' === $name ? 'brak SKU i nazwy' : 'brak jednoznacznego dopasowania na celu' );
+				'reason' => 'kilku nieprzypisanych kandydatów o tej nazwie na celu' );
 		}
 	}
 

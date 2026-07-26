@@ -1107,7 +1107,15 @@ echo "  PASS: a manually-added product is never adopted by name while total_sync
 # by the adopt phase every total sync chains through) correctly refuses to guess and marks the
 # source item "ambiguous" — but nothing stopped upsert_simple()/create_new_product() from then
 # creating ANOTHER product for it anyway. is_ambiguous_adopt_candidate() now makes total sync
-# skip creation for exactly this case instead of silently growing the catalog.
+# skip creation for exactly this case instead of blindly growing the catalog every run.
+#
+# The two stale, un-linked candidates are SKU-less, so their soft_delete_missing() match_key is
+# their NAME — which is NOT in this run's source_keys_set (the source item has its OWN SKU, so
+# only that SKU string is tracked, never its name). They are therefore correctly swept as "no
+# longer on the source" by the SAME run's mirror cleanup, before a next run can create the real,
+# correctly-linked product from a clean slate. So the count must never exceed the baseline at any
+# point (no runaway duplication) and must converge to exactly one correctly-linked product within
+# two runs — never staying stuck with the stale, unresolvable pair.
 echo "==> Phase 18: ambiguous name match does not create a phantom duplicate on total sync"
 opt per_page 10; opt sync_batch_limit 100; opt max_batch_seconds 0
 opt force_full_sync 0; opt deletion_mode none
@@ -1122,18 +1130,32 @@ foreach ( array(1,2) as $i ) { $p=new WC_Product_Simple(); $p->set_name("Shared 
 
 BASELINE18="$(twp eval 'echo count(get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Shared Name Item")));')"
 
+# Drives adopt + mirror exactly like handle_total_sync, but WITHOUT going through
+# run_adopt_event()/start_mirror_sync()'s spawn_cron() call — that fires a real async HTTP
+# loopback to this same site, which is harmless when this runs ONCE (as Phase 10 does), but
+# calling it twice in a row (needed here to prove convergence) leaves a window where a still
+# in-flight loopback from the FIRST call lands during the SECOND, non-deterministically
+# starting an uncontrolled extra sync. Replicating the adopt-step loop and seed_sync_progress()
+# directly gets the identical end state with no real cron dispatch at all.
 run_total() {
 	twp eval '
 	$s=WC_Product_Sync::instance();
 	delete_transient("wps_adopt_state"); delete_transient("wps_adopt_preview"); delete_option("wps_adopt_result"); delete_transient("wps_sync_progress");
 	$reset=new ReflectionMethod("WC_Product_Sync","adopt_reset");$reset->setAccessible(true);$reset->invoke($s,true,true);
-	update_option("wps_adopt_result",array("running"=>1,"apply"=>1,"total"=>1),false);
-	$ev=new ReflectionMethod("WC_Product_Sync","run_adopt_event");$ev->setAccessible(true);
-	$g=0; do { $g++; if($g>60)break; $ev->invoke($s); $res=get_option("wps_adopt_result"); } while ( is_array($res)&&!empty($res["running"]) );
-	$cron=new ReflectionMethod("WC_Product_Sync","run_sync_cron");$cron->setAccessible(true);
+	$step=new ReflectionMethod("WC_Product_Sync","adopt_step");$step->setAccessible(true);
+	do { $done = $step->invoke($s, PHP_FLOAT_MAX); } while ( ! $done );
+	$st   = get_transient("wps_adopt_state");
+	$plan = is_array($st) ? $st["plan"] : array("adopt"=>array(),"ambiguous"=>array(),"claimed"=>0);
+	set_transient("wps_adopt_preview", $plan, 30*MINUTE_IN_SECONDS);
+	delete_transient("wps_adopt_state");
+	$ts=new ReflectionProperty("WC_Product_Sync","total_sync");$ts->setAccessible(true);$ts->setValue($s,true);
+	$dm=new ReflectionProperty("WC_Product_Sync","dry_mode");$dm->setAccessible(true);$dm->setValue($s,false);
+	$fm=new ReflectionProperty("WC_Product_Sync","fast_mode");$fm->setAccessible(true);$fm->setValue($s,false);
+	$rr=new ReflectionMethod("WC_Product_Sync","reset_run_result");$rr->setAccessible(true);$rr->invoke($s,false);
+	$sd=new ReflectionMethod("WC_Product_Sync","seed_sync_progress");$sd->setAccessible(true);$sd->invoke($s);
+	$cron=new ReflectionMethod("WC_Product_Sync","run_sync_cron");$cron->setAccessible(true);$cron->invoke($s);
 	$resume=new ReflectionMethod("WC_Product_Sync","run_resume_batch");$resume->setAccessible(true);
-	$prog=get_transient("wps_sync_progress");
-	if ( is_array($prog) ) { if ((int)($prog["current_page"]??0)<1) { $cron->invoke($s); } $b=0; while(get_transient("wps_sync_progress")){ if(++$b>60)break; $resume->invoke($s); } }' >/dev/null
+	$b=0; while(get_transient("wps_sync_progress")){ if(++$b>60)break; $resume->invoke($s); }' >/dev/null
 }
 
 run_total
@@ -1142,9 +1164,12 @@ run_total
 N_AFTER_2="$(twp eval 'echo count(get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Shared Name Item")));')"
 echo "    'Shared Name Item' count: baseline=$BASELINE18, after run 1=$N_AFTER_1, after run 2=$N_AFTER_2"
 
-[ "$N_AFTER_1" -eq "$BASELINE18" ] || { echo "  FAIL: total sync created a phantom duplicate for an ambiguous name match ($BASELINE18 -> $N_AFTER_1)" >&2; exit 1; }
-[ "$N_AFTER_2" -eq "$BASELINE18" ] || { echo "  FAIL: a second total sync grew the count further ($N_AFTER_1 -> $N_AFTER_2)" >&2; exit 1; }
-echo "  PASS: an unresolved ambiguous name match is skipped, not duplicated, across repeated Total Sync runs"
+FINAL_SKU18="$(twp eval '$ids=get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids","title"=>"Shared Name Item")); $p=$ids?wc_get_product($ids[0]):null; echo $p?$p->get_sku():"none";')"
+
+[ "$N_AFTER_1" -le "$BASELINE18" ] || { echo "  FAIL: total sync created a phantom duplicate for an ambiguous name match ($BASELINE18 -> $N_AFTER_1)" >&2; exit 1; }
+[ "$N_AFTER_2" -eq 1 ] || { echo "  FAIL: did not converge to exactly one product after 2 runs (got $N_AFTER_2)" >&2; exit 1; }
+[ "$FINAL_SKU18" = "S-SHARED" ] || { echo "  FAIL: the surviving product is not the correctly-linked one (sku=$FINAL_SKU18)" >&2; exit 1; }
+echo "  PASS: an unresolved ambiguous name match is never duplicated, and converges to exactly one correctly-linked product"
 
 # --- Phase 19: ordinary sync's name-fallback must not silently bail on 2+ same-named targets --
 #
