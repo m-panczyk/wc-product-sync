@@ -705,8 +705,12 @@ $defaults = array(
 			case 'base_after_promo':
 				return array( 'regular' => $reg, 'sale' => '' );
 			default: // keep
-				return array( 'regular' => $reg, 'sale' => $sal );
-		}
+					// Guard against zero sale price — treat empty the same way to avoid "free" products.
+					if ( $sal !== '0' && $sal != 0 ) {
+						return array( 'regular' => $reg, 'sale' => $sal );
+					}
+					return array( 'regular' => $reg, 'sale' => '' );
+				}
 	}
 
 	/** Should this data field be written? On CREATE everything is imported; on UPDATE a field
