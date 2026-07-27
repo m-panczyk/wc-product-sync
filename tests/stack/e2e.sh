@@ -1276,5 +1276,49 @@ esac
 [ "$N21_AFTER" -eq 2 ] || { echo "  FAIL: dry run wrote to the target (count=$N21_AFTER, expected unchanged 2)" >&2; exit 1; }
 echo "  PASS: dry run correctly reports the ambiguous match as skipped, writes nothing"
 
+# --- Phase 22: backorders field syncs so target computes the right stock_status (issue #48) ---
+#
+# apply_stock() copied stock_quantity and stock_status but never backorders. This matters because
+# WooCommerce's own save() RECOMPUTES stock_status from manage_stock + stock_quantity + backorders
+# whenever manage_stock is true — an explicit set_stock_status() call is silently overridden the
+# moment the product is saved (verified directly: even on a hand-built product, set_stock_status()
+# has no effect when manage_stock is on). So a source variation with backorders='yes' and negative
+# quantity legitimately computes stock_status='onbackorder' — but a target variation that never
+# gets 'backorders' copied defaults to WooCommerce's own 'no', and recomputes 'outofstock' instead,
+# regardless of what stock_status the source reported. Copying backorders alongside
+# stock_quantity/stock_status fixes it, since it's the actual input WooCommerce's save() uses.
+echo "==> Phase 22: backorders field syncs to target (issue #48)"
+opt force_full_sync 0
+
+swp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$p = new WC_Product_Variable();
+$p->set_name( "Backorder Item" ); $p->set_sku( "BO-PARENT" ); $p->set_status( "publish" );
+$attr = new WC_Product_Attribute(); $attr->set_name( "Rozmiar" ); $attr->set_options( array( "S" ) ); $attr->set_visible( true ); $attr->set_variation( true );
+$p->set_attributes( array( $attr ) );
+$pid = $p->save();
+$v = new WC_Product_Variation();
+$v->set_parent_id( $pid ); $v->set_sku( "BO-VAR-S" ); $v->set_attributes( array( "rozmiar" => "S" ) );
+$v->set_regular_price( "10" );
+$v->set_manage_stock( true ); $v->set_stock_quantity( -5 ); $v->set_backorders( "yes" );
+$v->save();
+WC_Product_Variable::sync( $pid );' >/dev/null
+
+twp eval 'foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }' >/dev/null
+
+drive >/dev/null
+
+RESULT22="$(twp eval '
+$vid = wc_get_product_id_by_sku("BO-VAR-S");
+$v = $vid ? wc_get_product($vid) : null;
+echo $v ? ($v->get_stock_status()." ".$v->get_backorders()." ".$v->get_stock_quantity()) : "not_found";')"
+read STATUS22 BACKORDERS22 QTY22 <<<"$RESULT22"
+echo "    target variation BO-VAR-S: stock_status=$STATUS22 backorders=$BACKORDERS22 qty=$QTY22 (source: onbackorder/yes/-5)"
+
+[ "$STATUS22" = "onbackorder" ] || { echo "  FAIL: target stock_status=$STATUS22, expected onbackorder — backorders not synced so WC recomputed outofstock (#48)" >&2; exit 1; }
+[ "$BACKORDERS22" = "yes" ] || { echo "  FAIL: target backorders=$BACKORDERS22, expected yes — backorders field not synced (#48)" >&2; exit 1; }
+[ "$QTY22" = "-5" ] || { echo "  FAIL: target stock_quantity=$QTY22, expected -5" >&2; exit 1; }
+echo "  PASS: backorders field synced, target stock_status matches source (onbackorder)"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report + backorders-sync)"

@@ -85,11 +85,22 @@ Gdy stałe są zdefiniowane, pola w formularzu stają się nieaktywne i **nie na
 
 ## Synchronizacja produktów
 
-### Tryb synchronizacji (domyślnie)
-Domyślnie synchronizowane są tylko produkty o statusie `publish`. Produkty ze źródła o statusach innych niż `publish` (np. draft, pending, private) są pomijane.
+Zakres synchronizacji kontrolują trzy grupy checkboxów w ustawieniach wtyczki, niezależnie od siebie:
+**typy produktów**, **statusy w źródle** i **pola do synchronizacji**.
 
-### Nadpisywanie filtru statusów
-Możesz dodać inne statusy przez mu-plugins lub w `wp-config.php`:
+### Typy produktów (`sync_types`)
+
+Domyślnie zaznaczone wszystkie trzy: `simple`, `variable`, `grouped`. Odznaczony typ jest całkowicie
+pomijany — z powodem widocznym w raporcie przebiegu — niezależnie od reszty ustawień.
+
+### Statusy w źródle (`sync_statuses`)
+
+Checkboxy w panelu: `publish`, `draft`, `pending`, `private`. **Domyślnie zaznaczony tylko `publish`**
+— produkty ze źródła w innym statusie są pomijane. Zaznacz dodatkowe statusy w panelu, żeby np.
+synchronizować też szkice.
+
+Można to samo (albo więcej — dowolny status niedostępny w panelu) osiągnąć programowo przez filtr,
+który działa NIEZALEŻNIE od checkboxów powyżej (dodaje do wybranego zestawu, nie zastępuje go):
 
 ```php
 add_filter( 'wps_sync_statuses', function( $statuses ) {
@@ -98,6 +109,30 @@ add_filter( 'wps_sync_statuses', function( $statuses ) {
     return $statuses;
 } );
 ```
+
+### Pola do synchronizacji (`sync_fields`)
+
+Domyślnie zaznaczone wszystkie. Odznaczone pole **NIE jest nadpisywane** — ani przy tworzeniu nowego
+produktu (zostaje puste), ani przy aktualizacji istniejącego (lokalna wartość jest zachowana).
+**Nazwa, status i SKU są zawsze synchronizowane**, niezależnie od tych ustawień.
+
+| Pole w panelu | Co obejmuje |
+|---|---|
+| **Opis** | Opis pełny i krótki |
+| **Cena** | Cena regularna i promocyjna — patrz [„Ceny: modyfikator i tryb promocji"](#ceny-modyfikator-i-tryb-promocji) |
+| **Stan magazynowy** | `manage_stock`, `stock_quantity`, `backorders`, `stock_status` — **wszystkie cztery razem, jako jedna jednostka** (patrz uwaga niżej) |
+| **Obrazy** | Główny obraz + galeria, mapowane inkrementalnie — patrz [„Wydajność i wsadowanie"](#wydajność-i-wsadowanie) |
+| **Kategorie** | Przypisania do kategorii produktu (tworzy brakujące na celu) |
+| **Atrybuty** | Tylko produkty `variable` — patrz [„Ograniczenia"](#ograniczenia) |
+| **Waga i wymiary** | Waga, długość, szerokość, wysokość |
+
+**„Stan magazynowy" to jedna jednostka, nie da się zsynchronizować np. tylko `stock_quantity` bez
+`backorders`.** To ma znaczenie praktyczne: WooCommerce przelicza `stock_status` z `manage_stock` +
+`stock_quantity` + `backorders` **przy każdym zapisie produktu** (`WC_Product::save()` woła
+`validate_props()`) — jawnie ustawiony `stock_status` jest przy tym po cichu nadpisywany, jeśli
+`backorders` się nie zgadza. Dlatego wtyczka kopiuje wszystkie cztery pola razem: samo `stock_quantity`
++ `stock_status` bez `backorders` dawałoby na celu inny wynik niż na źródle za każdym razem, gdy
+źródło ma włączone zamówienia na wyczerpanym stanie (`backorders: yes`/`notify`).
 
 ---
 

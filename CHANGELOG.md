@@ -1,5 +1,18 @@
 ## Zmiany (Changelog)
 
+### 0.9.27-rc10 — synchronizacja pola backorders dla wariacji (#48); dokumentacja opcji panelu
+
+- Gdy wariacja na źródle ma `backorders` włączone (`yes`/`notify`) i ujemny/zerowy stan magazynowy,
+  słusznie liczy się jako `onbackorder`. `apply_stock()` kopiowało `stock_quantity` i `stock_status`,
+  ale nigdy `backorders` — a WooCommerce **przelicza `stock_status` z `manage_stock` +
+  `stock_quantity` + `backorders` przy każdym zapisie produktu** (`WC_Product::save()` →
+  `validate_props()`), więc jawnie ustawiony `stock_status` był po cichu nadpisywany. Bez
+  `backorders` cel zawsze dostawał `outofstock` zamiast poprawnego `onbackorder`. Naprawione:
+  `backorders` jest teraz kopiowane razem z resztą pól magazynowych.
+- Dokumentacja: README opisuje teraz opcje **„Typy produktów"**, **„Statusy w źródle"** i **„Pola do
+  synchronizacji"** z panelu wtyczki — w tym, że „Stan magazynowy" to jedna jednostka
+  (`manage_stock`/`stock_quantity`/`backorders`/`stock_status` razem) i dlaczego.
+
 ### 0.9.27-rc9 — total sync nie duplikuje już produktów przy niejednoznacznym dopasowaniu po nazwie (#42)
 
 - **[krytyczne]** Gdy 2+ nieprzypisane produkty na celu mają tę samą nazwę, total sync tworzył

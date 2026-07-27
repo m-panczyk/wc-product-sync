@@ -4,7 +4,7 @@ Tags: woocommerce, product-sync, sku, batch-import
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.9.27-rc9
+Stable tag: 0.9.27-rc10
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -92,6 +92,11 @@ define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxx' ); // prywatne repozytorium
 Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp transient delete wps_update_info`.
 
 == Changelog ==
+
+= 0.9.27-rc10 =
+
+* Naprawiono synchronizację pola `backorders` (zamówienia na wyczerpanym stanie) dla wariacji produktów wariantowych — WooCommerce przelicza `stock_status` z `manage_stock` + `stock_quantity` + `backorders` przy każdym zapisie, więc brak `backorders` na celu dawał `outofstock` zamiast poprawnego `onbackorder` (#48)
+* Dokumentacja: opisano w README opcje "Typy produktów", "Statusy w źródle" i "Pola do synchronizacji" z panelu wtyczki
 
 = 0.9.27-rc9 =
 
