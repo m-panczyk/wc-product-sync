@@ -2611,6 +2611,11 @@ $defaults = array(
 		if ( $manage && isset( $src['stock_quantity'] ) ) {
 			$obj->set_stock_quantity( wc_stock_amount( $src['stock_quantity'] ) );
 		}
+		if ( ! empty( $src['backorders'] ) ) {
+			$obj->set_backorders( $src['backorders'] );
+		} else {
+			$obj->set_backorders( 'no' );
+		}
 		if ( ! empty( $src['stock_status'] ) ) {
 			$obj->set_stock_status( $src['stock_status'] );
 		}
