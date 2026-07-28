@@ -2663,14 +2663,14 @@ $defaults = array(
 			return $cache;
 		}
 		$cache = array();
-		if ( ! function_exists( 'wc_get_tax_classes' ) ) {
+		if ( ! class_exists( 'WC_Tax' ) ) {
 			return $cache;
 		}
-		$class_names = wc_get_tax_classes();
-		foreach ( $class_names as $name ) {
+		$class_slugs = WC_Tax::get_tax_class_slugs();
+		foreach ( $class_slugs as $slug ) {
 			$cache[] = array(
-				'name' => $name,
-				'slug' => sanitize_title( $name ),
+				'name' => $slug,
+				'slug' => sanitize_title( $slug ),
 			);
 		}
 		return $cache;
