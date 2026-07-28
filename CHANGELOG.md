@@ -1,5 +1,23 @@
 ## Zmiany (Changelog)
 
+### 0.9.27-rc11 — synchronizacja klasy podatku (#51); naprawa fałszywych ostrzeżeń (#52); sprzątanie i dokumentacja (#53)
+
+- **Nowość: synchronizacja klasy podatku (`tax_class`, #51).** Nowe pole do synchronizacji „Klasa
+  podatku (tax class)" — kopiuje `tax_class` ze źródła na cel dla produktów prostych, wariantowych
+  i pojedynczych wariacji. Wartość jest kopiowana zawsze, nawet gdy cel nie ma takiej klasy
+  skonfigurowanej (produkt i tak dostaje wartość ze źródła), z ostrzeżeniem w logu do ręcznej
+  weryfikacji.
+- **[krytyczne] Naprawiono fałszywe ostrzeżenia o brakującej klasie podatku (#52).** Wykrywanie
+  klas podatku na celu odwoływało się do nieistniejącej funkcji WooCommerce (`wc_get_tax_classes()`)
+  — po cichu zwracała pustą listę (osłonięta `function_exists()`), więc wtyczka zawsze zakładała, że
+  cel nie ma **żadnej** klasy podatku skonfigurowanej, i logowała ostrzeżenie dla każdego produktu z
+  niestandardową klasą, nawet gdy klasa faktycznie istniała (np. wbudowane `reduced-rate`,
+  `zero-rate`). Naprawione użyciem prawdziwego API (`WC_Tax::get_tax_class_slugs()`). Sama wartość
+  `tax_class` zawsze synchronizowała się poprawnie — błąd dotyczył wyłącznie fałszywego logowania.
+- **Sprzątanie i dokumentacja (#53).** Usunięto martwy fragment kodu z wykrywania klas podatku
+  (porównanie z nigdy nie ustawianym kluczem), bez zmiany zachowania — zweryfikowane e2e. README
+  opisuje teraz opcję „Klasa podatku" w tabeli pól do synchronizacji.
+
 ### 0.9.27-rc10 — synchronizacja pola backorders dla wariacji (#48); dokumentacja opcji panelu
 
 - Gdy wariacja na źródle ma `backorders` włączone (`yes`/`notify`) i ujemny/zerowy stan magazynowy,
