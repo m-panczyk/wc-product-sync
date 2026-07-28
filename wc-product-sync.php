@@ -2633,16 +2633,7 @@ $defaults = array(
 			return;
 		}
 		// Check if destination has this tax class configured.
-		$existing_classes = $this->get_destination_tax_classes();
-		$found = false;
-		foreach ( $existing_classes as $class ) {
-			if ( strtolower( $class['name'] ) === strtolower( $tax_class )
-				|| strtolower( $class['slug'] ) === strtolower( $tax_class )
-				|| $class['id'] == $tax_class ) {
-				$found = true;
-				break;
-			}
-		}
+		$found = in_array( strtolower( $tax_class ), $this->get_destination_tax_classes(), true );
 		if ( ! $found ) {
 			$product_name = isset( $src['name'] ) ? $src['name'] : '(unknown)';
 			$this->log( 'warning', sprintf(
@@ -2656,22 +2647,13 @@ $defaults = array(
 		$obj->set_tax_class( $tax_class );
 	}
 
-	/** Get all tax classes configured on the destination WooCommerce site. */
+	/** Lower-cased tax class slugs configured on the destination WooCommerce site (e.g.
+	 *  'reduced-rate', 'zero-rate'). Empty/standard has no slug and is handled separately in
+	 *  apply_tax_class(), so it's never in this list. */
 	private function get_destination_tax_classes() {
 		static $cache = null;
-		if ( null !== $cache ) {
-			return $cache;
-		}
-		$cache = array();
-		if ( ! class_exists( 'WC_Tax' ) ) {
-			return $cache;
-		}
-		$class_slugs = WC_Tax::get_tax_class_slugs();
-		foreach ( $class_slugs as $slug ) {
-			$cache[] = array(
-				'name' => $slug,
-				'slug' => sanitize_title( $slug ),
-			);
+		if ( null === $cache ) {
+			$cache = class_exists( 'WC_Tax' ) ? array_map( 'strtolower', WC_Tax::get_tax_class_slugs() ) : array();
 		}
 		return $cache;
 	}
