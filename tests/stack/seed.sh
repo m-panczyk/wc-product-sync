@@ -115,13 +115,13 @@ for ( $i = 1; $i <= $variable; $i++ ) {
 		$v->set_sku( sprintf( "E2E-V-%03d-%s", $i, $size ) );
 		$v->set_attributes( array( "rozmiar" => $size ) );
 		$v->set_regular_price( number_format( mt_rand( 1000, 30000 ) / 100, 2, ".", "" ) );
-				$v->set_manage_stock( true );
-				$v->set_stock_quantity( mt_rand( 0, 100 ) );
-				// First two variations also carry a non-standard tax class to test variation-level sync.
-				if ( $k < 2 ) {
-					$v->set_tax_class( "reduced-rate" );
-				}
-				$v->save();
+		$v->set_manage_stock( true );
+		$v->set_stock_quantity( mt_rand( 0, 100 ) );
+		// First two variations also carry a non-standard tax class to test variation-level sync.
+		if ( $k < 2 ) {
+			$v->set_tax_class( "reduced-rate" );
+		}
+		$v->save();
 	}
 	// Roll parent min/max price + stock status up from the variations.
 	WC_Product_Variable::sync( $pid );
