@@ -125,6 +125,7 @@ produktu (zostaje puste), ani przy aktualizacji istniejącego (lokalna wartość
 | **Kategorie** | Przypisania do kategorii produktu (tworzy brakujące na celu) |
 | **Atrybuty** | Tylko produkty `variable` — patrz [„Ograniczenia"](#ograniczenia) |
 | **Waga i wymiary** | Waga, długość, szerokość, wysokość |
+| **Klasa podatku (tax class)** | `tax_class` — produktów prostych, wariantowych i pojedynczych wariacji |
 
 **„Stan magazynowy" to jedna jednostka, nie da się zsynchronizować np. tylko `stock_quantity` bez
 `backorders`.** To ma znaczenie praktyczne: WooCommerce przelicza `stock_status` z `manage_stock` +
@@ -133,6 +134,11 @@ produktu (zostaje puste), ani przy aktualizacji istniejącego (lokalna wartość
 `backorders` się nie zgadza. Dlatego wtyczka kopiuje wszystkie cztery pola razem: samo `stock_quantity`
 + `stock_status` bez `backorders` dawałoby na celu inny wynik niż na źródle za każdym razem, gdy
 źródło ma włączone zamówienia na wyczerpanym stanie (`backorders: yes`/`notify`).
+
+**„Klasa podatku" kopiuje się zawsze, nawet gdy cel nie ma takiej klasy skonfigurowanej** — produkt
+i tak dostaje wartość ze źródła (np. `reduced-rate`), a wtyczka loguje ostrzeżenie do
+`WooCommerce → Status → Logi`, żeby dało się to zauważyć i doenfigurować klasę na celu ręcznie.
+Pusta klasa na źródle (`standard`) zawsze synchronizuje się bezpiecznie, bez sprawdzania.
 
 ---
 
