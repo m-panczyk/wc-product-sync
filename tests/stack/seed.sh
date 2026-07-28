@@ -117,6 +117,10 @@ for ( $i = 1; $i <= $variable; $i++ ) {
 		$v->set_regular_price( number_format( mt_rand( 1000, 30000 ) / 100, 2, ".", "" ) );
 		$v->set_manage_stock( true );
 		$v->set_stock_quantity( mt_rand( 0, 100 ) );
+		// First two variations also carry a non-standard tax class to test variation-level sync.
+		if ( $k < 2 ) {
+			$v->set_tax_class( "reduced-rate" );
+		}
 		$v->save();
 	}
 	// Roll parent min/max price + stock status up from the variations.
@@ -213,6 +217,19 @@ $k->set_regular_price( "97.00" );
 $k->set_status( "publish" );
 $k->save();
 
-printf( "seeded: %d products (incl. draft/private/no-SKU skip cases)\n",
+// --- Tax class fixture -----------------------------------------------------------------------
+// The plugin claims to sync tax_class (sync_fields includes 'tax_class'). This product has a
+// non-standard tax class so the compare in e2e.sh can verify it actually arrives on target.
+$taxClass = "reduced-rate";
+$tc = new WC_Product_Simple();
+$tc->set_name( "E2E Tax Class Fixture" );
+$tc->set_sku( "E2E-TAX-001" );
+$tc->set_regular_price( "10.00" );
+$tc->set_status( "publish" );
+$tc->set_category_ids( array( $cat_id ) );
+$tc->set_tax_class( $taxClass );
+$tc->save();
+
+printf( "seeded: %d products (incl. draft/private/no-SKU skip cases, tax-class fixture)\n",
 	count( get_posts( array( "post_type" => "product", "numberposts" => -1, "fields" => "ids", "post_status" => "any" ) ) ) );
 '

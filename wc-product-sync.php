@@ -594,7 +594,7 @@ $defaults = array(
 		// What to sync (defaults preserve legacy behaviour: everything, publish only).
 		'sync_types'          => array( 'simple', 'variable', 'grouped' ),
 		'sync_statuses'       => array( 'publish' ),
-		'sync_fields'         => array( 'description', 'price', 'stock', 'images', 'categories', 'attributes', 'dimensions' ),
+		'sync_fields'         => array( 'description', 'price', 'stock', 'images', 'categories', 'attributes', 'dimensions', 'tax_class' ),
 		// Fast field-refresh (frequent, update-only): which volatile fields to refresh and how often.
 		'fast_sync_enabled'      => 0,
 		'fast_sync_interval_min' => 60,                      // minutes (floored to 15 at use)
@@ -880,7 +880,7 @@ $defaults = array(
 		// "What to sync" multi-selects (checkbox groups): keep only known values, in order.
 		$out['sync_types']    = $this->sanitize_choice_set( $input['sync_types'] ?? array(), array( 'simple', 'variable', 'grouped' ) );
 		$out['sync_statuses'] = $this->sanitize_choice_set( $input['sync_statuses'] ?? array(), array( 'publish', 'draft', 'pending', 'private' ) );
-		$out['sync_fields']   = $this->sanitize_choice_set( $input['sync_fields'] ?? array(), array( 'description', 'price', 'stock', 'images', 'categories', 'attributes', 'dimensions' ) );
+		$out['sync_fields']   = $this->sanitize_choice_set( $input['sync_fields'] ?? array(), array( 'description', 'price', 'stock', 'images', 'categories', 'attributes', 'dimensions', 'tax_class' ) );
 		// Fast field-refresh settings.
 		$out['fast_sync_enabled']      = empty( $input['fast_sync_enabled'] ) ? 0 : 1;
 		if ( isset( $input['fast_sync_interval_min'] ) ) {
@@ -1226,6 +1226,7 @@ $defaults = array(
 								'categories'  => __( 'Kategorie', 'wc-product-sync' ),
 								'attributes'  => __( 'Atrybuty', 'wc-product-sync' ),
 								'dimensions'  => __( 'Waga i wymiary', 'wc-product-sync' ),
+								'tax_class'   => __( 'Klasa podatku (tax class)', 'wc-product-sync' ),
 							), $opts['sync_fields'] ); ?>
 							<p class="description"><?php esc_html_e( 'Odznaczone pola NIE są nadpisywane (przy tworzeniu i aktualizacji) — lokalne zmiany są zachowane. Nazwa, status i SKU są zawsze synchronizowane.', 'wc-product-sync' ); ?></p>
 						</td>
@@ -2621,6 +2622,60 @@ $defaults = array(
 		}
 	}
 
+	private function apply_tax_class( $obj, array $src, $sku = '' ) {
+		if ( ! $this->field_on( 'tax_class' ) ) {
+			return;
+		}
+		$tax_class = isset( $src['tax_class'] ) ? (string) $src['tax_class'] : '';
+		// Empty tax class = standard/default — always safe to set.
+		if ( '' === $tax_class ) {
+			$obj->set_tax_class( '' );
+			return;
+		}
+		// Check if destination has this tax class configured.
+		$existing_classes = $this->get_destination_tax_classes();
+		$found = false;
+		foreach ( $existing_classes as $class ) {
+			if ( strtolower( $class['name'] ) === strtolower( $tax_class )
+				|| strtolower( $class['slug'] ) === strtolower( $tax_class )
+				|| $class['id'] == $tax_class ) {
+				$found = true;
+				break;
+			}
+		}
+		if ( ! $found ) {
+			$product_name = isset( $src['name'] ) ? $src['name'] : '(unknown)';
+			$this->log( 'warning', sprintf(
+				'[TAX_SYNC] [WARN] Produkt %s (%s): klasa podatku "%s" zródła nie istnieje na celu. Produkty beda miec domyslna klase podatku.',
+				$product_name,
+				$sku ?: '(brak SKU)',
+				$tax_class
+			) );
+		}
+		// Always set the class even if unmapped — user can fix classes on destination later.
+		$obj->set_tax_class( $tax_class );
+	}
+
+	/** Get all tax classes configured on the destination WooCommerce site. */
+	private function get_destination_tax_classes() {
+		static $cache = null;
+		if ( null !== $cache ) {
+			return $cache;
+		}
+		$cache = array();
+		if ( ! class_exists( 'WC_Tax' ) ) {
+			return $cache;
+		}
+		$class_slugs = WC_Tax::get_tax_class_slugs();
+		foreach ( $class_slugs as $slug ) {
+			$cache[] = array(
+				'name' => $slug,
+				'slug' => sanitize_title( $slug ),
+			);
+		}
+		return $cache;
+	}
+
 	private function ensure_product_type( $existing_id, $wanted_class, $wanted_term ) {
 		$product = $existing_id ? wc_get_product( $existing_id ) : null;
 		if ( $product && ! is_a( $product, $wanted_class ) ) {
@@ -2676,6 +2731,9 @@ $defaults = array(
 			}
 		}
 		$this->apply_physical( $product, $p );
+		if ( '' !== $sku ) {
+			$this->apply_tax_class( $product, $p, $sku );
+		}
 
 		$id = $product->save();
 		if ( ! $id ) {
@@ -2758,6 +2816,12 @@ $defaults = array(
 			}
 		}
 		$this->apply_physical( $product, $p );
+		if ( '' !== $sku ) {
+			$this->apply_tax_class( $product, $p, $sku );
+		} else {
+			// Product matched by name (no SKU) — still apply tax class but use name for log.
+			$this->apply_tax_class( $product, $p );
+		}
 
 		$id = $product->save();
 		if ( ! $id ) {
@@ -3123,6 +3187,11 @@ $defaults = array(
 				}
 				$this->apply_stock( $variation, $sv );
 				$this->apply_physical( $variation, $sv );
+				if ( ! empty( $dedup_sku ) ) {
+					$this->apply_tax_class( $variation, $sv, $dedup_sku );
+				} else {
+					$this->apply_tax_class( $variation, $sv );
+				}
 				$variation->set_attributes( $attrs );
 
 				// New variation, or an existing one whose price/stock changed → parent rollup stale.
