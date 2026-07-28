@@ -61,6 +61,7 @@ foreach ( wc_get_products( array( "limit" => -1, "status" => "publish" ) ) as $p
 		"weight"      => (string) $p->get_weight(),
 		"dims"        => implode( "x", array( (string) $p->get_length(), (string) $p->get_width(), (string) $p->get_height() ) ),
 		"cats"        => $cats,
+		"tax_class"   => $p->get_tax_class(),
 		"n_images"    => ( $p->get_image_id() ? 1 : 0 ) + count( $p->get_gallery_image_ids() ),
 		"vars"        => array(),
 	);
@@ -87,6 +88,7 @@ foreach ( wc_get_products( array( "limit" => -1, "status" => "publish" ) ) as $p
 				"price"  => (string) $v->get_regular_price(),
 				"stock"  => $v->get_stock_quantity(),
 				"attrs"  => $attrs,
+				"tax_class" => $v->get_tax_class(),
 			);
 		}
 		ksort( $row["vars"] );
