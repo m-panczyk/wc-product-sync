@@ -4,7 +4,7 @@ Tags: woocommerce, product-sync, sku, batch-import
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.9.27-rc10
+Stable tag: 0.9.27-rc11
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -92,6 +92,12 @@ define( 'WC_PRODUCT_SYNC_UPDATE_TOKEN', 'xxxxxxxx' ); // prywatne repozytorium
 Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp transient delete wps_update_info`.
 
 == Changelog ==
+
+= 0.9.27-rc11 =
+
+* Nowość: synchronizacja klasy podatku (`tax_class`) — produktów prostych, wariantowych i pojedynczych wariacji; dodano opcję "Klasa podatku (tax class)" w polach do synchronizacji (#51)
+* [krytyczne] Naprawiono fałszywe ostrzeżenia "klasa podatku źródła nie istnieje na celu" logowane dla każdego produktu z niestandardową klasą podatku — kod odwoływał się do nieistniejącej funkcji WooCommerce, przez co zawsze uznawał, że cel nie ma żadnych klas podatku skonfigurowanych (#52)
+* Sprzątanie: usunięto martwy fragment kodu z wykrywania klas podatku, bez zmiany zachowania; dokumentacja opcji "Klasa podatku" w README (#53)
 
 = 0.9.27-rc10 =
 
