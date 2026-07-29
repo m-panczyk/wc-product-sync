@@ -3900,7 +3900,11 @@ $defaults = array(
 			$batch = get_posts( array(
 				'fields'         => 'ids',
 				'post_type'      => 'product',
-				'post_status'    => array( 'publish', 'pending', 'private' ),
+				// 'draft' belongs here too: sync_statuses can include it as a syncable source
+				// status (a plugin-created product can legitimately be draft), and total sync's
+				// mirror must catch foreign/leftover products regardless of status. Without it, a
+				// draft product survives every total sync run forever (#confirmed via live repro).
+				'post_status'    => array( 'publish', 'pending', 'private', 'draft' ),
 				'posts_per_page' => 100,
 				'paged'          => $page,
 				'no_found_rows'  => true,

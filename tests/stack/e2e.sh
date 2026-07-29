@@ -1322,5 +1322,36 @@ echo "    target variation BO-VAR-S: stock_status=$STATUS22 backorders=$BACKORDE
 [ "$QTY22" = "-5" ] || { echo "  FAIL: target stock_quantity=$QTY22, expected -5" >&2; exit 1; }
 echo "  PASS: backorders field synced, target stock_status matches source (onbackorder)"
 
+# --- Phase 23: total sync must remove a foreign DRAFT product, not just publish/pending/private -
+#
+# soft_delete_missing()'s deletion-candidate query checked post_status IN (publish, pending,
+# private) — 'draft' was missing, apparently predating sync_statuses making draft a syncable
+# status. A foreign/leftover product (never touched by this plugin: no _wps_synced, so it also
+# escapes the separate force_full timestamp-based wipe) sitting in draft status survived every
+# Total Sync run forever, because the mirror's own deletion query never even considered it.
+# Reproduced live before the fix: target held 2 products after Total Sync against a 1-product
+# source; after adding 'draft' to the query, it correctly dropped to 1.
+echo "==> Phase 23: total sync removes a foreign draft product (previously survived forever)"
+opt per_page 10; opt sync_batch_limit 100; opt max_batch_seconds 0
+opt force_full_sync 0; opt deletion_mode none
+
+swp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$p=new WC_Product_Simple(); $p->set_name("Still Here 23"); $p->set_sku("STILL-HERE-23"); $p->set_regular_price("50"); $p->set_status("publish"); $p->save();' >/dev/null
+
+twp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$a=new WC_Product_Simple(); $a->set_name("Still Here 23"); $a->set_sku("STILL-HERE-23-OLD"); $a->set_regular_price("50"); $a->set_status("publish"); $a->save();
+$f=new WC_Product_Simple(); $f->set_name("Foreign Draft Leftover 23"); $f->set_sku("FOREIGN-DRAFT-23"); $f->set_regular_price("30"); $f->set_status("draft"); $f->save();' >/dev/null
+
+run_total
+N23="$(twp eval 'echo count(get_posts(array("post_type"=>"product","post_status"=>"any","numberposts"=>-1,"fields"=>"ids")));')"
+FOREIGN23="$(twp eval 'echo wc_get_product_id_by_sku("FOREIGN-DRAFT-23") ? "survived" : "removed";')"
+echo "    total products after Total Sync: $N23 (expected 1); foreign draft product: $FOREIGN23"
+
+[ "$FOREIGN23" = "removed" ] || { echo "  FAIL: foreign draft product survived Total Sync (post_status gap in soft_delete_missing)" >&2; exit 1; }
+[ "$N23" -eq 1 ] || { echo "  FAIL: expected exactly 1 product after Total Sync, got $N23" >&2; exit 1; }
+echo "  PASS: total sync correctly removes a foreign draft product"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report + backorders-sync)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report + backorders-sync + total-sync-draft-removal)"
