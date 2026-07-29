@@ -776,6 +776,10 @@ $defaults = array(
 	 *  like internal Docker/container service names (no dots = no public TLD). */
 	private function is_private_host( $host ) {
 		$host = strtolower( trim( (string) $host ) );
+		// Check explicit whitelist first.
+		if ( $this->is_insecure_host_allowed( $host ) ) {
+			return false;
+		}
 		if ( 'localhost' === $host || '::1' === $host ) {
 			return true;
 		}
@@ -804,6 +808,17 @@ $defaults = array(
 	}
 
 	/* =====================================================================
+	/** Check if a host is in the 'insecure_hosts' whitelist. Comma-separated list of
+	 *  lowercase hostnames (no scheme, no port). Each entry is trimmed before matching.
+	 *  Single-character names like 'redis' are allowed. */
+	private function is_insecure_host_allowed( $host ) {
+		$raw = isset( $this->get_options()['insecure_hosts'] ) ? $this->get_options()['insecure_hosts'] : '';
+		if ( ! is_string( $raw ) || '' === trim( $raw ) ) {
+			return false;
+		}
+		$hosts = array_map( 'strtolower', array_filter( array_map( 'trim', explode( ',', $raw ) ) ) );
+		return in_array( strtolower( $host ), $hosts, true );
+	}
 	 *  Ustawienia (Settings API)
 	 * ================================================================== */
 
@@ -828,6 +843,21 @@ $defaults = array(
 		}
 		if ( isset( $input['consumer_secret'] ) ) {
 			$out['consumer_secret']  = sanitize_text_field( trim( $input['consumer_secret'] ) );
+
+		// Sanitize insecure_hosts.
+		if ( isset( $input['insecure_hosts'] ) ) {
+			$ih = sanitize_text_field( trim( $input['insecure_hosts'] ) );
+			$valid = true;
+			if ( '' !== $ih ) {
+				foreach ( explode( ',', $ih ) as $h ) {
+					$h = trim( $h );
+					if ( $h && ! preg_match( '/^[a-z0-9][a-z0-9.-]*[a-z0-9]$|^[a-z0-9]$/', $h ) ) {
+						$valid = false;
+						break;
+					}
+				}
+			}
+			$out['insecure_hosts'] = $valid ? $ih : ( isset( $out['insecure_hosts'] ) ? $out['insecure_hosts'] : '' );
 		}
 	if ( isset( $input['per_page'] ) ) {
 			$out['per_page']         = max( 1, min( 100, (int) $input['per_page'] ) );
@@ -1166,6 +1196,12 @@ $defaults = array(
 								value="<?php echo esc_attr( $opts['consumer_secret'] ); ?>" <?php disabled( defined( 'WC_PRODUCT_SYNC_CS' ) ); ?> />
 							<p class="description"><?php esc_html_e( 'Zalecane: trzymaj klucze w wp-config.php, nie w bazie.', 'wc-product-sync' ); ?></p>
 						</td>
+				<tr>
+					<th scope="row"><label for="wps_insecure"><?php esc_html_e( 'Dozwolone hosty HTTP', 'wc-product-sync' ); ?></label></th>
+					<td><input name="<?php echo esc_attr( self::OPTION_KEY ); ?>[insecure_hosts]" id="wps_insecure" type="text" class="regular-text"
+						value="<?php echo esc_attr( isset( $opts['insecure_hosts'] ) ? $opts['insecure_hosts'] : '' ); ?>" />
+					<p class="description"><?php esc_html_e( 'Lista hostów rozdzielona przecinkami, które mogą używać HTTP (bez http:// ani portu). Domyślnie wszystkie bez kropki w nazwie — np. serwisy Docker — są blokowane; wpisz tu swoje (np. src-wp) aby zezwolić.', 'wc-product-sync' ); ?></p></td>
+				</tr>
 					</tr>
 <tr>
 					<th scope="row"><label for="wps_pp"><?php esc_html_e( 'Produktów na stronę', 'wc-product-sync' ); ?></label></th>
