@@ -568,7 +568,7 @@ private function save_sync_progress( $current_page, $products_processed, $total_
 	 * ================================================================== */
 
 	private function get_options() {
-$defaults = array(
+		$defaults = array(
 		'source_url'          => '',
 		'consumer_key'        => '',
 		'consumer_secret'     => '',
@@ -847,6 +847,7 @@ $defaults = array(
 		}
 		if ( isset( $input['consumer_secret'] ) ) {
 			$out['consumer_secret']  = sanitize_text_field( trim( $input['consumer_secret'] ) );
+		}
 
 		// Sanitize insecure_hosts.
 		if ( isset( $input['insecure_hosts'] ) ) {
