@@ -808,6 +808,8 @@ $defaults = array(
 	}
 
 	/* =====================================================================
+	 * ================================================================== */
+
 	/** Check if a host is in the 'insecure_hosts' whitelist. Comma-separated list of
 	 *  lowercase hostnames (no scheme, no port). Each entry is trimmed before matching.
 	 *  Single-character names like 'redis' are allowed. */
@@ -819,6 +821,8 @@ $defaults = array(
 		$hosts = array_map( 'strtolower', array_filter( array_map( 'trim', explode( ',', $raw ) ) ) );
 		return in_array( strtolower( $host ), $hosts, true );
 	}
+
+	/* =====================================================================
 	 *  Ustawienia (Settings API)
 	 * ================================================================== */
 
@@ -857,9 +861,14 @@ $defaults = array(
 					}
 				}
 			}
+			if ( ! $valid && '' !== $ih ) {
+				add_settings_error( self::OPTION_KEY, 'wps_insecure_hosts',
+					__( 'Invalid hostname entered — hostnames must be lowercase alphanumeric with dots/hyphens only.', 'wc-product-sync' ),
+					'error' );
+			}
 			$out['insecure_hosts'] = $valid ? $ih : ( isset( $out['insecure_hosts'] ) ? $out['insecure_hosts'] : '' );
 		}
-	if ( isset( $input['per_page'] ) ) {
+		if ( isset( $input['per_page'] ) ) {
 			$out['per_page']         = max( 1, min( 100, (int) $input['per_page'] ) );
 		}
 		if ( isset( $input['sync_batch_limit'] ) ) {
