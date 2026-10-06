@@ -1428,10 +1428,11 @@ case "$HPOS25" in
     # No FeaturesUtil in this WC version → HPOS declaration API unsupported, nothing to verify.
     echo "  SKIP: FeaturesUtil not present in this WooCommerce version — HPOS declaration not testable"
     ;;
-  ok/*) : ;;
+  ok/*)
+    echo "  PASS: WooCommerce records custom_order_tables as compatible for this plugin (HPOS declaration works)"
+    ;;
   *) echo "  FAIL: HPOS (custom_order_tables) not declared compatible for this plugin (got: '$HPOS25')" >&2; exit 1 ;;
 esac
-echo "  PASS: WooCommerce records custom_order_tables as compatible for this plugin (HPOS declaration works)"
 
 echo
 echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report + backorders-sync + total-sync-draft-removal + normal-sync-draft-soft-delete + hpos-compat-decl)"

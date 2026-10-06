@@ -84,9 +84,31 @@ sed -i "/That'"'"'s all, stop editing/i \
 /* WPS_E2E_SSL_SHIM: make WC accept Basic auth on a plain-HTTP test rig. */\n\$_SERVER[\"HTTPS\"] = \"on\";\n" \
 /var/www/html/wp-config.php'
 
+# The target can hold over from a previously *cancelled* run: CI reuses the DinD daemon and the
+# fixed-name compose volume, so a run interrupted mid-suite (concurrency cancel-in-progress)
+# leaves later-phase fixtures (COLLIDE-1, PMOD-1, SRC-PLASZCZ, ...) plus plugin state behind.
+# seed.sh re-seeds the SOURCE only, so the next run's Phase 1 strict source<->target parity fails
+# on those leftovers. Wipe the target's products, attachments and plugin state first. Idempotent —
+# a no-op on a fresh target. Runs BEFORE the options below so the source_url/keys are (re)written.
+reset_target() {
+	twp eval '
+	$ids = get_posts( array( "post_type" => array( "product", "product_variation" ), "numberposts" => -1, "fields" => "ids", "post_status" => "any" ) );
+	foreach ( $ids as $id ) { wp_delete_post( $id, true ); }
+	foreach ( get_posts( array( "post_type" => "attachment", "numberposts" => -1, "fields" => "ids", "post_status" => "any" ) ) as $id ) { wp_delete_post( $id, true ); }
+	delete_option( "wc_product_sync_options" );
+	delete_option( "wps_last_sync_result" );
+	delete_option( "wps_last_sync_report" );
+	delete_option( "wps_adopt_result" );
+	foreach ( array( "wps_sync_running", "wps_sync_progress", "wps_sync_source_keys", "wps_adopt_state", "wps_adopt_preview" ) as $t ) { delete_transient( $t ); }
+	' >/dev/null
+	echo "    target reset to a known-clean state"
+}
+
 # --- Plugin on the target -----------------------------------------------------------------
 echo "==> Installing the plugin on the target from the built ZIP"
 twp plugin install "/tmp/wc-product-sync-$VERSION.zip" --force --activate >/dev/null
+echo "==> Resetting the target (guard against leftovers from a cancelled run)"
+reset_target
 twp option patch update wc_product_sync_options source_url "$SRC_URL" >/dev/null 2>&1 || \
 	twp option update wc_product_sync_options \
 		"{\"source_url\":\"$SRC_URL\",\"consumer_key\":\"$CK\",\"consumer_secret\":\"$CS\"}" --format=json >/dev/null
