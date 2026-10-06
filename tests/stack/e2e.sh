@@ -1404,5 +1404,30 @@ opt deletion_mode none
 [ "$FOREIGN24" = "draft/live/notag" ] || { echo "  FAIL: normal sync touched a foreign draft product ($FOREIGN24)" >&2; exit 1; }
 echo "  PASS: normal sync soft-deletes its own missing draft, leaves live + foreign products alone"
 
+# --- Phase 25: HPOS (custom_order_tables) compatibility is actually DECLARED to WooCommerce --
+#
+# 0.9.27-rc12 added a before_woocommerce_init hook that calls
+# FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true). Without it
+# WooCommerce lists the plugin as incompatible with HPOS and can block enabling it. The
+# declaration is in-memory (per request, re-registered on every plugins_loaded), so verify it
+# by asking WooCommerce back for this plugin's compatibility in the same request: the feature
+# must be in the 'compatible' list. A plugin that never declares is reported with 'uncertain'
+# for everything and an empty 'compatible' list, so this assertion fails on a missing hook.
+echo "==> Phase 25: plugin declares HPOS (custom_order_tables) compatibility to WooCommerce"
+HPOS25="$(twp eval '
+$plug = "wc-product-sync/wc-product-sync.php";
+if ( ! class_exists( "\\Automattic\\WooCommerce\\Utilities\\FeaturesUtil" ) ) { echo "noclass"; exit; }
+$info = \Automattic\WooCommerce\Utilities\FeaturesUtil::get_compatible_features_for_plugin( $plug );
+$comp = isset( $info["compatible"] ) ? array_values( $info["compatible"] ) : array();
+$incomp = isset( $info["incompatible"] ) ? array_values( $info["incompatible"] ) : array();
+echo ( in_array( "custom_order_tables", $comp, true ) ? "ok" : ( in_array( "custom_order_tables", $incomp, true ) ? "declared-incompatible" : "not-declared" ) )
+     . "/" . implode( ",", $comp );')"
+echo "    HPOS declaration as seen by WooCommerce: $HPOS25"
+case "$HPOS25" in
+  ok/*) : ;;
+  *) echo "  FAIL: HPOS (custom_order_tables) not declared compatible for this plugin (got: '$HPOS25')" >&2; exit 1 ;;
+esac
+echo "  PASS: WooCommerce records custom_order_tables as compatible for this plugin (HPOS declaration works)"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report + backorders-sync + total-sync-draft-removal + normal-sync-draft-soft-delete)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report + backorders-sync + total-sync-draft-removal + normal-sync-draft-soft-delete + hpos-compat-decl)"
