@@ -24,8 +24,8 @@ x-db: &db
 
 x-wp: &wp
   # Pinned, not :latest — an image bump must be a visible commit, not a silent
-  # change under a green CI run. Current WooCommerce requires WP >= 6.9.
-  image: wordpress:6.9-apache
+  # change under a green CI run. Current WooCommerce requires WP >= 7.0 (6.9 broke CI: "Minimum WordPress requirement is 7.0").
+  image: wordpress:7.0-apache
   healthcheck:
     test: ['CMD', 'curl', '-fsS', 'http://localhost/']
     interval: 5s

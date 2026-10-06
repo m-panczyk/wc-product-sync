@@ -1,5 +1,26 @@
 ## Zmiany (Changelog)
 
+### 0.9.27-rc12 — total sync usuwa obce drafty (#32, #56); zgodność z HPOS; WP 7.0 / WC 11.1
+
+- **[krytyczne] Total sync usuwa obce produkty w statusie draft (#32, #56).** `soft_delete_missing()`
+  szukało kandydatów do usunięcia tylko w statusach `publish`/`pending`/`private` — warunek starszy
+  niż możliwość synchronizowania draftów (`sync_statuses`). Obcy produkt (bez `_wps_synced`, więc
+  pomijany też przez kasowanie `force_full`) w statusie draft przeżywał każdy total sync. Dodano
+  `draft` do zapytania; test e2e (faza 23).
+- **Zmiana zachowania w zwykłej synchronizacji.** Ta sama poprawka działa we wszystkich trybach:
+  przy `deletion_mode` = soft/hard zwykła synchronizacja usuwa teraz także **własne** produkty w
+  statusie draft, których nie ma już w źródle (np. po odznaczeniu `draft` w „Statusy w źródle").
+  Wcześniej zostawały na zawsze. Obce produkty nadal są nietykane (filtr `_wps_synced`), a produkty
+  już soft-usunięte nie są przetwarzane ponownie (`_wps_soft_deleted_at`). Nowy test e2e (faza 24)
+  przypina te reguły.
+- **Zgodność z HPOS.** Deklaracja `custom_order_tables` przez `FeaturesUtil::declare_compatibility`
+  — wtyczka nie czyta ani nie zapisuje zamówień. Bez niej WooCommerce pokazywał wtyczkę jako
+  niekompatybilną i mógł blokować włączenie HPOS.
+- **WordPress 7.0 / WooCommerce 11.1.** `Tested up to: 7.0`, nagłówek `WC tested up to: 11.1`.
+  Stack e2e podniesiony z `wordpress:6.9-apache` do `7.0-apache` — aktualny WooCommerce wymaga WP 7.0
+  i na 6.9 instalacja WC w CI kończyła się błędem.
+- Readme: poprawione literówki.
+
 ### 0.9.27-rc11 — synchronizacja klasy podatku (#51); naprawa fałszywych ostrzeżeń (#52); sprzątanie i dokumentacja (#53)
 
 - **Nowość: synchronizacja klasy podatku (`tax_class`, #51).** Nowe pole do synchronizacji „Klasa

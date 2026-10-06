@@ -2,9 +2,9 @@
 Contributors: mpanczyk
 Tags: woocommerce, product-sync, sku, batch-import
 Requires at least: 6.0
-Tested up to: 6.6
+Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 0.9.27-rc11
+Stable tag: 0.9.27-rc12
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -93,6 +93,13 @@ Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp t
 
 == Changelog ==
 
+= 0.9.27-rc12 =
+
+* [krytyczne] Total sync usuwa teraz także obce produkty w statusie „szkic" (draft) — wcześniej zapytanie o kandydatów do usunięcia pomijało drafty, więc takie produkty przetrwały każdy przebieg (#32, #56)
+* Zmiana zachowania: przy włączonym usuwaniu (tryb „szkic+tag" lub „trwałe") również zwykła synchronizacja usuwa produkty w statusie draft, które sama wcześniej zsynchronizowała, a których nie ma już w źródle (np. po odznaczeniu „draft" w „Statusy w źródle"). Obce produkty (niezsynchronizowane przez wtyczkę) nadal są pomijane
+* Deklaracja zgodności z HPOS (tabele zamówień WooCommerce) — wtyczka nie dotyka zamówień; WooCommerce przestaje oznaczać ją jako niekompatybilną
+* Testowane z WordPress 7.0 i WooCommerce 11.1; środowisko testów e2e podniesione do WordPress 7.0 (aktualny WooCommerce wymaga WP 7.0)
+
 = 0.9.27-rc11 =
 
 * Nowość: synchronizacja klasy podatku (`tax_class`) — produktów prostych, wariantowych i pojedynczych wariacji; dodano opcję "Klasa podatku (tax class)" w polach do synchronizacji (#51)
@@ -127,14 +134,14 @@ Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp t
 * Nieudany zapis wariacji nie kasuje już istniejących wariacji (naprawa #15)
 * Produkt wariantowy nie jest tworzony „na pusto" przy braku wariacji (#15)
 * Harmonogram: godzina działa i respektuje strefę czasu (#12)
-* Total sync (lustro źródła) — synchronizacja całego katalogu + twardy usuwanie brakujących
+* Total sync (lustro źródła) — synchronizacja całego katalogu + twarde usuwanie brakujących
 * Symulacja i scalanie nie przekraczają już limitu czasu serwera (batchowanie w tle)
 * Wybór kanału aktualizacji w panelu (Stabilny / Testowy RC)
 * Naprawa dopasowania po nazwie (poprawne `title` zamiast `post_title`) (#15)
 * Scalanie istniejących produktów (`adopt_existing`) z podglądem przed zapisem
 * Cofanie ostatniej synchronizacji (`undo_run`) — przenosi do kosza produkty utworzone w ostatnim przebiegu
 * Endpoint atrybutów przestał być wymagany — mapa atrybutów odtwarzana z payloadów produktów
-* Nieodzwzorowana wariacja to błąd, nie ciche pominięcie
+* Nieodwzorowana wariacja to błąd, nie ciche pominięcie
 
 = 0.9.27-rc6 =
 
@@ -216,7 +223,7 @@ Metadane są cache'owane **12 h** (sukces) / **2 h** (błąd). Wymuszenie: `wp t
 == Upgrade Notice ==
 
 = 0.9.27 =
-Krytyczne naprawie: dopasowanie po nazwie, bezpieczny zapis wariacji, batchowanie dry-run/scalania, total sync i cofanie syncu. Zalecana aktualizacja.
+Krytyczne naprawy: dopasowanie po nazwie, bezpieczny zapis wariacji, batchowanie dry-run/scalania, total sync i cofanie syncu. Zalecana aktualizacja.
 
 = 0.9.27-rc6 =
 Nowy tryb promocji cen (price_promotion_mode) — kompatybilne wstecz, domyślne zachowanie niezmienione.

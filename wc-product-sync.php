@@ -2,11 +2,12 @@
 /**
  * Plugin Name:       WC Product Sync (SKU)
  * Description:        Codzienna synchronizacja produktów ze zdalnego sklepu WooCommerce (źródło) do TEGO sklepu (cel). Dopasowanie po SKU (lub nazwie gdy brak SKU). Obsługa: simple, variable, grouped. Zapisy lokalnie przez WooCommerce CRUD.
- * Version:           0.9.27-rc11
+ * Version:           0.9.27-rc12
  * Author:            Michał Pańczyk
  * Requires PHP:      7.4
  * Requires at least: 6.0
  * Requires Plugins:  woocommerce
+ * WC tested up to:   11.1
  * Text Domain:       wc-product-sync
  * License:           GPLv2 or later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
@@ -4260,3 +4261,12 @@ register_activation_hook( __FILE__, array( 'WC_Product_Sync', 'activate' ) );
 register_deactivation_hook( __FILE__, array( 'WC_Product_Sync', 'deactivate' ) );
 register_uninstall_hook( __FILE__, array( 'WC_Product_Sync', 'uninstall' ) );
 add_action( 'plugins_loaded', array( 'WC_Product_Sync', 'instance' ) );
+
+// HPOS (custom order tables): the plugin only reads/writes products, never orders, so it is
+// compatible. Without this declaration WooCommerce lists it as incompatible and can block
+// enabling HPOS on the store.
+add_action( 'before_woocommerce_init', function () {
+	if ( class_exists( '\\Automattic\\WooCommerce\\Utilities\\FeaturesUtil' ) ) {
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+	}
+} );

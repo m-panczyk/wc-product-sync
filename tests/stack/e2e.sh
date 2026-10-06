@@ -1353,5 +1353,56 @@ echo "    total products after Total Sync: $N23 (expected 1); foreign draft prod
 [ "$N23" -eq 1 ] || { echo "  FAIL: expected exactly 1 product after Total Sync, got $N23" >&2; exit 1; }
 echo "  PASS: total sync correctly removes a foreign draft product"
 
+# --- Phase 24: NORMAL sync + soft delete now also reaches the plugin's own DRAFT products -----
+#
+# Phase 23's fix (adding 'draft' to soft_delete_missing()'s candidate query) is not total-sync
+# only: a regular sync with deletion_mode=soft/hard also starts considering drafts. Pin down the
+# intended semantics so they can't drift silently:
+#   - a draft product the plugin synced (_wps_synced) that disappeared from the source IS
+#     soft-deleted (meta + wps-usuniete tag) — before the fix it survived forever;
+#   - a published synced product still in the source is untouched;
+#   - a FOREIGN draft (no _wps_synced) is untouched — normal sync only removes its own products.
+echo "==> Phase 24: normal sync soft-deletes a synced draft missing from source, spares foreign drafts"
+opt per_page 10; opt sync_batch_limit 100; opt max_batch_seconds 0
+opt force_full_sync 0; opt deletion_mode soft; opt soft_delete_limit 50
+# opt() writes scalars only; sync_statuses is an array.
+twp eval '$o=(array)get_option("wc_product_sync_options",array()); $o["sync_statuses"]=array("publish","draft"); update_option("wc_product_sync_options",$o);' >/dev/null
+
+swp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$k=new WC_Product_Simple(); $k->set_name("Keep 24"); $k->set_sku("KEEP-24"); $k->set_regular_price("40"); $k->set_status("publish"); $k->save();
+$d=new WC_Product_Simple(); $d->set_name("Synced Draft 24"); $d->set_sku("DRAFT-24"); $d->set_regular_price("20"); $d->set_status("draft"); $d->save();' >/dev/null
+
+twp eval '
+foreach ( get_posts( array( "post_type"=>array("product","product_variation"),"post_status"=>"any","numberposts"=>-1,"fields"=>"ids" ) ) as $id ) { wp_delete_post($id,true); }
+$f=new WC_Product_Simple(); $f->set_name("Foreign Draft 24"); $f->set_sku("FOREIGN-24"); $f->set_regular_price("10"); $f->set_status("draft"); $f->save();' >/dev/null
+
+twp transient delete wps_sync_source_keys >/dev/null 2>&1 || true
+drive >/dev/null
+SYNCED24="$(twp eval '$id=wc_get_product_id_by_sku("DRAFT-24"); echo $id ? get_post_status($id)."/".(get_post_meta($id,"_wps_synced",true)?"synced":"unsynced") : "missing";')"
+[ "$SYNCED24" = "draft/synced" ] || { echo "  FAIL: setup — DRAFT-24 on target is '$SYNCED24', expected draft/synced" >&2; exit 1; }
+
+swp eval 'wp_delete_post( wc_get_product_id_by_sku("DRAFT-24"), true );' >/dev/null
+twp transient delete wps_sync_source_keys >/dev/null 2>&1 || true
+drive >/dev/null
+
+STATE24="$(twp eval '
+$st=function($sku){ $id=wc_get_product_id_by_sku($sku); if(!$id){return "missing";}
+  $sd=get_post_meta($id,"_wps_soft_deleted_at",true)?"soft":"live";
+  $tag=has_term("wps-usuniete","product_tag",$id)?"tag":"notag";
+  return get_post_status($id)."/".$sd."/".$tag; };
+echo $st("DRAFT-24")." ".$st("KEEP-24")." ".$st("FOREIGN-24");')"
+read -r DRAFT24 KEEP24 FOREIGN24 <<<"$STATE24"
+echo "    synced draft gone from source: $DRAFT24 | still in source: $KEEP24 | foreign draft: $FOREIGN24"
+
+# Restore defaults for anything appended after this phase.
+twp eval '$o=(array)get_option("wc_product_sync_options",array()); $o["sync_statuses"]=array("publish"); update_option("wc_product_sync_options",$o);' >/dev/null
+opt deletion_mode none
+
+[ "$DRAFT24" = "draft/soft/tag" ]    || { echo "  FAIL: synced draft missing from source was not soft-deleted ($DRAFT24)" >&2; exit 1; }
+[ "$KEEP24" = "publish/live/notag" ] || { echo "  FAIL: product still in source was touched ($KEEP24)" >&2; exit 1; }
+[ "$FOREIGN24" = "draft/live/notag" ] || { echo "  FAIL: normal sync touched a foreign draft product ($FOREIGN24)" >&2; exit 1; }
+echo "  PASS: normal sync soft-deletes its own missing draft, leaves live + foreign products alone"
+
 echo
-echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report + backorders-sync + total-sync-draft-removal)"
+echo "e2e PASS (sync + force-full + image + empty-source + undo + adopt + channel + bg-dry + bg-adopt + total-sync + total-refuse + var-integrity + schedule + price-mod + price-promo + sku-collision-guard + sku-collision-re-sync + total-sync-name-guard + ambiguous-no-duplicate + name-fallback-multi-match + ambiguous-variable-product + ambiguous-dry-run-report + backorders-sync + total-sync-draft-removal + normal-sync-draft-soft-delete)"
