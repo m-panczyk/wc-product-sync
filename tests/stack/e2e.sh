@@ -1424,6 +1424,10 @@ echo ( in_array( "custom_order_tables", $comp, true ) ? "ok" : ( in_array( "cust
      . "/" . implode( ",", $comp );')"
 echo "    HPOS declaration as seen by WooCommerce: $HPOS25"
 case "$HPOS25" in
+  noclass)
+    # No FeaturesUtil in this WC version → HPOS declaration API unsupported, nothing to verify.
+    echo "  SKIP: FeaturesUtil not present in this WooCommerce version — HPOS declaration not testable"
+    ;;
   ok/*) : ;;
   *) echo "  FAIL: HPOS (custom_order_tables) not declared compatible for this plugin (got: '$HPOS25')" >&2; exit 1 ;;
 esac
