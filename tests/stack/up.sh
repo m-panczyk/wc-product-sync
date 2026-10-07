@@ -100,6 +100,13 @@ reset_target() {
 	delete_option( "wps_last_sync_report" );
 	delete_option( "wps_adopt_result" );
 	foreach ( array( "wps_sync_running", "wps_sync_progress", "wps_sync_source_keys", "wps_adopt_state", "wps_adopt_preview" ) as $t ) { delete_transient( $t ); }
+	// Match the uninstall() teardown in wc-product-sync.php:4245-4249,4254: also clear
+	// the scheduled cron events and the self-hosted update cache. A stale one-off
+	// CRON_HOOK left by a total-sync cancelled mid-run would otherwise fire a full sync
+	// mid-suite, racing the manual drive() orchestration (unlike the resume/adopt hooks,
+	// run_sync_cron() has no no-op guard once its transients are cleared).
+	foreach ( array( "wc_product_sync_daily_event", "wc_product_sync_fast_event", "wps_sync_resume", "wps_adopt_event" ) as $h ) { wp_clear_scheduled_hook( $h ); }
+	delete_transient( "wps_update_info" );
 	' >/dev/null
 	echo "    target reset to a known-clean state"
 }
